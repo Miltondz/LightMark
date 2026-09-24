@@ -73,18 +73,14 @@ pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<S
     let mut byte_offset = 0usize;
 
     for mat in re.find_iter(search_text) {
-        // Convert byte offset in search_text to byte offset in original text
         let actual_start = if options.case_sensitive {
             mat.start()
         } else {
-            // We need to map from the lowercased string back to the original
-            // For simplicity, we search the original string instead
             byte_offset + mat.start()
         };
 
         let actual_end = actual_start + (mat.end() - mat.start());
 
-        // Calculate line and column
         let prefix = &full_text[..actual_start];
         let line = prefix.chars().filter(|&c| c == '\n').count();
         let last_newline = prefix.rfind('\n');
@@ -93,7 +89,6 @@ pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<S
             None => actual_start,
         };
 
-        // Get the matched text
         let matched_text: String = full_text[actual_start..actual_end].to_string();
 
         results.push(SearchResult {
@@ -121,7 +116,6 @@ pub fn replace_in_rope(
     }
 
     if replace_all {
-        // Apply all replacements in reverse order to maintain offsets
         for result in results.iter().rev() {
             rope.remove(result.start..result.end);
             rope.insert(result.start, replacement);
@@ -137,12 +131,7 @@ pub fn replace_in_rope(
     }
 }
 
-pub fn find_next(
-    results: &[SearchResult],
-    current_pos: usize,
-    wrap: bool,
-    text_len: usize,
-) -> Option<usize> {
+pub fn find_next(results: &[SearchResult], current_pos: usize, wrap: bool) -> Option<usize> {
     for (i, result) in results.iter().enumerate() {
         if result.start > current_pos {
             return Some(i);
