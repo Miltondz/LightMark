@@ -2449,6 +2449,8 @@ name = "lightmark"
 version = "0.1.0"
 dependencies = [
  "ropey",
+ "serde",
+ "serde_json",
  "slint",
 ]
 

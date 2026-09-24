@@ -2,6 +2,10 @@ use ropey::Rope;
 use slint::{ComponentHandle, SharedString, VecModel};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::SystemTime;
+
+mod scratch;
+use scratch::ScratchManager;
 
 slint::slint! {
     import { Button, HorizontalBox, TextEdit, VerticalBox } from "std-widgets.slint";
@@ -13,6 +17,8 @@ slint::slint! {
         callback tab-clicked(int);
         callback close-tab(int);
         callback new-tab();
+        callback new-scratch();
+        callback save-scratch();
         callback switch-group(int);
         callback set-group-count(int);
 
@@ -79,11 +85,19 @@ slint::slint! {
                     }
                 }
                 Button {
-                    text: "+";
-                    width: 24px;
+                    text: "Scratch";
+                    width: 60px;
                     height: 24px;
                     clicked => {
-                        root.new-tab();
+                        root.new-scratch();
+                    }
+                }
+                Button {
+                    text: "Save";
+                    width: 60px;
+                    height: 24px;
+                    clicked => {
+                        root.save-scratch();
                     }
                 }
             }
@@ -96,9 +110,32 @@ slint::slint! {
     }
 }
 
+#[derive(Clone)]
 struct Tab {
-    title: String,
+    title: SharedString,
     document: Rope,
+    is_scratch: bool,
+    scratch_id: Option<String>,
+}
+
+impl Tab {
+    fn new_regular(title: &str, document: Rope) -> Self {
+        Self {
+            title: title.into(),
+            document,
+            is_scratch: false,
+            scratch_id: None,
+        }
+    }
+
+    fn new_scratch(document: Rope, scratch_id: String) -> Self {
+        Self {
+            title: format!("Scratch {}", scratch_id).into(),
+            document,
+            is_scratch: true,
+            scratch_id: Some(scratch_id),
+        }
+    }
 }
 
 struct Group {
@@ -109,21 +146,23 @@ struct Group {
 struct EditorState {
     groups: Vec<Group>,
     active_group: usize,
+    scratch_manager: ScratchManager,
+    last_save: SystemTime,
 }
 
 impl EditorState {
     fn new() -> Self {
-        let tabs = vec![Tab {
-            title: "Tab 1".to_string(),
-            document: Rope::from("Hello, world!\n"),
-        }];
+        let tabs = vec![Tab::new_regular("Tab 1", Rope::from("Hello, world!\n"))];
         let groups = vec![Group {
             tabs,
             active_tab: 0,
         }];
+        let scratch_dir = scratch::ensure_scratch_dirs();
         Self {
             groups,
             active_group: 0,
+            scratch_manager: ScratchManager::new(scratch_dir),
+            last_save: SystemTime::now(),
         }
     }
 
@@ -134,7 +173,7 @@ impl EditorState {
     fn tab_titles(&self) -> Vec<SharedString> {
         self.active_group_tabs()
             .iter()
-            .map(|tab| tab.title.clone().into())
+            .map(|tab| tab.title.clone())
             .collect()
     }
 
@@ -189,15 +228,76 @@ fn main() -> Result<(), slint::PlatformError> {
             let mut s = state_clone.borrow_mut();
             let ag = s.active_group;
             let new_index = s.groups[ag].tabs.len();
-            s.groups[ag].tabs.push(Tab {
-                title: format!("Tab {}", new_index + 1),
-                document: Rope::new(),
-            });
+            s.groups[ag].tabs.push(Tab::new_regular(
+                &format!("Tab {}", new_index + 1),
+                Rope::new(),
+            ));
             s.groups[ag].active_tab = new_index;
             ui.set_tab_titles(make_model(s.tab_titles()));
             ui.set_tab_count(s.groups[ag].tabs.len() as i32);
             ui.set_documentText(s.document_text());
             ui.set_active_tab(new_index as i32);
+        }
+    });
+
+    // Handle new scratch document
+    let ui_weak = ui.as_weak();
+    let state_clone = state.clone();
+    ui.on_new_scratch(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let mut s = state_clone.borrow_mut();
+            // Create scratch document with content from current state
+            let scratch_id = s.scratch_manager.next_id_public();
+            let ag = s.active_group;
+            let new_index = s.groups[ag].tabs.len();
+            s.groups[ag]
+                .tabs
+                .push(Tab::new_scratch(Rope::new(), scratch_id));
+            s.groups[ag].active_tab = new_index;
+            ui.set_tab_titles(make_model(s.tab_titles()));
+            ui.set_tab_count(s.groups[ag].tabs.len() as i32);
+            ui.set_documentText(s.document_text());
+            ui.set_active_tab(new_index as i32);
+        }
+    });
+
+    // Handle save scratch (autosave/debounce)
+    let ui_weak = ui.as_weak();
+    let state_clone = state.clone();
+    ui.on_save_scratch(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let mut s = state_clone.borrow_mut();
+            let ag = s.active_group;
+            let active_tab = s.groups[ag].active_tab;
+            // Save content back to the tab
+            let current_text = ui.get_documentText();
+            s.groups[ag].tabs[active_tab].document = Rope::from_str(current_text.as_ref());
+
+            let is_scratch = s.groups[ag].tabs[active_tab].is_scratch;
+            if is_scratch {
+                // Clone what we need to avoid borrow conflicts
+                let scratch_id = s.groups[ag].tabs[active_tab].scratch_id.clone();
+                let doc_clone = s.groups[ag].tabs[active_tab].document.clone();
+                let base_dir = s.scratch_manager.base_dir().to_path_buf();
+
+                if let Some(ref sid) = scratch_id {
+                    let mut index = scratch::ScratchIndex::load(&base_dir);
+                    if let Some(mut scratch_doc) = s
+                        .scratch_manager
+                        .create_scratch_doc_for_save(sid.clone(), doc_clone)
+                    {
+                        if s.scratch_manager
+                            .save_scratch(&mut scratch_doc, &mut index)
+                            .is_err()
+                        {
+                            eprintln!("Failed to autosave scratch document");
+                        }
+                        // Update the tab title based on content
+                        s.groups[ag].tabs[active_tab].title = scratch_doc.effective_title().into();
+                    }
+                }
+            }
+            s.last_save = SystemTime::now();
         }
     });
 
@@ -240,10 +340,7 @@ fn main() -> Result<(), slint::PlatformError> {
             // If the group doesn't exist yet, create it
             while s.groups.len() <= s.active_group {
                 s.groups.push(Group {
-                    tabs: vec![Tab {
-                        title: "Tab 1".to_string(),
-                        document: Rope::new(),
-                    }],
+                    tabs: vec![Tab::new_regular("Tab 1", Rope::new())],
                     active_tab: 0,
                 });
             }
