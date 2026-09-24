@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::SystemTime;
 
+mod markdown;
 mod scratch;
 use scratch::ScratchManager;
 
@@ -19,15 +20,18 @@ slint::slint! {
         callback new-tab();
         callback new-scratch();
         callback save-scratch();
+        callback toggle-markdown-view();
         callback switch-group(int);
         callback set-group-count(int);
 
         in-out property <[string]> tab_titles;
         in-out property <string> documentText;
+        in-out property <string> markdownViewText;
         in-out property <int> active_tab;
         in-out property <int> tab_count;
         in-out property <int> group_count;
         in-out property <int> active_group;
+        in-out property <bool> markdown_view_enabled;
 
         VerticalBox {
             // Group selector row
@@ -100,11 +104,25 @@ slint::slint! {
                         root.save-scratch();
                     }
                 }
+                Button {
+                    text: "View";
+                    width: 60px;
+                    height: 24px;
+                    clicked => {
+                        root.toggle-markdown-view();
+                    }
+                }
             }
 
             // Editor area
+            // Editor area - two TextEdit elements, one visible at a time
             TextEdit {
                 text <=> root.documentText;
+                visible: !root.markdown_view_enabled;
+            }
+            TextEdit {
+                text: root.markdownViewText;
+                visible: root.markdown_view_enabled;
             }
         }
     }
@@ -215,8 +233,14 @@ fn main() -> Result<(), slint::PlatformError> {
             s.groups[ag].tabs[old_active].document = Rope::from_str(current_text.as_ref());
             // Switch to the new tab
             s.groups[ag].active_tab = index as usize;
+            // Load the new tab's content
             ui.set_documentText(s.document_text());
             ui.set_active_tab(s.groups[ag].active_tab as i32);
+            // Update markdown view if enabled
+            if ui.get_markdown_view_enabled() {
+                let rendered = markdown::render_markdown_to_html(s.document_text().as_ref());
+                ui.set_markdownViewText(rendered.into());
+            }
         }
     });
 
@@ -359,6 +383,24 @@ fn main() -> Result<(), slint::PlatformError> {
     ui.on_set_group_count(move |count| {
         if let Some(ui) = ui_weak.upgrade() {
             ui.set_group_count(count);
+        }
+    });
+
+    // Handle markdown view toggle
+    let ui_weak = ui.as_weak();
+    ui.on_toggle_markdown_view(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            let was_enabled = ui.get_markdown_view_enabled();
+            let new_enabled = !was_enabled;
+
+            if new_enabled {
+                // Render markdown when enabling view
+                let current_text = ui.get_documentText();
+                let rendered = markdown::render_markdown_to_html(current_text.as_ref());
+                ui.set_markdownViewText(rendered.into());
+            }
+
+            ui.set_markdown_view_enabled(new_enabled);
         }
     });
 
