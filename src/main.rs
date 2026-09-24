@@ -6,6 +6,7 @@ use std::time::SystemTime;
 
 mod markdown;
 mod scratch;
+mod search;
 use scratch::ScratchManager;
 
 slint::slint! {
@@ -21,6 +22,11 @@ slint::slint! {
         callback new-scratch();
         callback save-scratch();
         callback toggle-markdown-view();
+        callback search-text(string);
+        callback replace-text(string);
+        callback find-next();
+        callback find-prev();
+        callback toggle-search-panel();
         callback switch-group(int);
         callback set-group-count(int);
 

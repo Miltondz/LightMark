@@ -2458,6 +2458,7 @@ name = "lightmark"
 version = "0.1.0"
 dependencies = [
  "pulldown-cmark",
+ "regex",
  "ropey",
  "serde",
  "serde_json",
