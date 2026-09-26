@@ -36,13 +36,6 @@ pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<S
     }
 
     let full_text = rope.to_string();
-    let lower_text = if !options.case_sensitive {
-        Some(full_text.to_lowercase())
-    } else {
-        None
-    };
-
-    let search_text = lower_text.as_deref().unwrap_or(&full_text);
 
     let escaped_query = if options.use_regex {
         query.to_string()
@@ -56,30 +49,22 @@ pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<S
         escaped_query
     };
 
-    let regex_options = if options.case_sensitive {
-        regex::RegexBuilder::new(&pattern).build()
-    } else {
-        regex::RegexBuilder::new(&pattern)
-            .case_insensitive(true)
-            .build()
-    };
+    let regex_builder = regex::RegexBuilder::new(&pattern);
+    let mut regex_builder = regex_builder;
+    if !options.case_sensitive {
+        regex_builder.case_insensitive(true);
+    }
 
-    let re = match regex_options {
+    let re = match regex_builder.build() {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
 
     let mut results = Vec::new();
-    let mut byte_offset = 0usize;
 
-    for mat in re.find_iter(search_text) {
-        let actual_start = if options.case_sensitive {
-            mat.start()
-        } else {
-            byte_offset + mat.start()
-        };
-
-        let actual_end = actual_start + (mat.end() - mat.start());
+    for mat in re.find_iter(&full_text) {
+        let actual_start = mat.start();
+        let actual_end = mat.end();
 
         let prefix = &full_text[..actual_start];
         let line = prefix.chars().filter(|&c| c == '\n').count();
@@ -98,8 +83,6 @@ pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<S
             column,
             text: matched_text,
         });
-
-        byte_offset = actual_end;
     }
 
     results

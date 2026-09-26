@@ -1,4 +1,6 @@
 /target
-
-# MinGW installer
-mingw-get-setup.exe
+*.exe
+*.zip
+*.pdb
+*.log
+!installer.iss
