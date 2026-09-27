@@ -5,6 +5,7 @@
 //! de comandos en `main.rs`).
 
 use super::{activate_tab, push_active_document_to_ui, refresh_recent, refresh_ui, set_status, SharedState};
+use crate::session::{SessionManager, SessionV2, WindowState as SessionWindowState};
 use crate::App;
 use slint::ComponentHandle;
 use std::path::PathBuf;
@@ -186,8 +187,11 @@ pub fn open_path(ui: &App, state: &SharedState, path: PathBuf) {
             {
                 let mut st = state.borrow_mut();
                 st.settings.add_recent(path.to_string_lossy().to_string());
-                st.settings.save().ok();
             }
+            // Bug W3: punto único de escritura — antes cada ventana guardaba su propia
+            // copia de `recent_files` sin tocar la del registro ni la de las demás
+            // ventanas, así que las listas de recientes divergían y se pisaban entre sí.
+            super::settings_ops::commit_settings(state);
             refresh_recent(ui, state);
             set_status(ui, &format!("Abierto: {}", path.display()));
         }
@@ -206,8 +210,8 @@ fn open_recent(ui: &App, state: &SharedState, index: i32) {
         {
             let mut st = state.borrow_mut();
             st.settings.recent_files.retain(|x| x != &p);
-            st.settings.save().ok();
         }
+        super::settings_ops::commit_settings(state);
         refresh_recent(ui, state);
         set_status(ui, "El archivo ya no existe; se quitó de recientes");
         return;
@@ -382,8 +386,8 @@ pub fn save_as_tab_with_name(
                 tab.last_known_mtime = mtime;
                 tab.mark_saved();
                 st.settings.add_recent(path.to_string_lossy().to_string());
-                st.settings.save().ok();
             }
+            super::settings_ops::commit_settings(state);
             let duplicate_warning = match duplicate {
                 Some((dg, di)) => {
                     let other_dirty = state
@@ -643,12 +647,55 @@ fn close_all(ui: &App, state: &SharedState) {
 /// `restore_session` esté activado, que es lo que hace que esa sesión se vuelva a leer
 /// en el siguiente arranque (ver `confirm_close_if_needed`, hallazgo C.7, para el caso
 /// contrario).
+/// Bug W2 (revisión post multi-ventana): la versión anterior solo guardaba/consideraba la
+/// ventana que invocaba (v1, una sola ventana), lo que con varias ventanas registradas
+/// sobrescribía la sesión v2 con una v1 de una sola ventana — perdiendo la geometría y el
+/// contenido sin guardar de TODAS las demás ventanas (y sus borradores quedaban huérfanos en
+/// disco). Ahora recorre TODAS las ventanas registradas (`windows::snapshot_ids`), guarda los
+/// borradores de cada una y construye una `SessionV2` completa antes de escribirla una sola
+/// vez — mismo resultado que `session_tick_multi` en `main.rs` pero sin depender del flag
+/// `session_dirty` (el hot-exit siempre debe guardar, se pidió explícitamente cerrar).
 pub fn perform_hot_exit(state: &SharedState) {
-    let mut st = state.borrow_mut();
-    st.editor.save_all_scratches().ok();
-    let session = st.editor.to_session();
-    st.editor.session_manager.save_auto_session(&session).ok();
-    st.settings.save().ok();
+    let ids = super::windows::snapshot_ids();
+    for id in &ids {
+        super::windows::with_window(*id, |_ui, w_state| {
+            w_state.borrow_mut().editor.save_all_scratches().ok();
+        });
+    }
+    let mut windows_out: Vec<SessionWindowState> = Vec::new();
+    let most_recent = super::windows::most_recent();
+    let mut active_window = 0usize;
+    for (i, id) in ids.iter().enumerate() {
+        if most_recent == Some(*id) {
+            active_window = i;
+        }
+        super::windows::with_window(*id, |ui, w_state| {
+            let st = w_state.borrow();
+            let pos = ui.window().position();
+            let size = ui.window().size();
+            let maximized = ui.window().is_maximized();
+            let session = st.editor.to_session();
+            windows_out.push(SessionWindowState::from_session(
+                session,
+                pos.x,
+                pos.y,
+                size.width as f32,
+                size.height as f32,
+                maximized,
+            ));
+        });
+    }
+    if !windows_out.is_empty() {
+        // Todas las ventanas registradas comparten el mismo directorio de sesiones (todas se
+        // crearon a partir del mismo `app_data_dir`, ver `main.rs::bring_up_window`), así que
+        // basta con reutilizar el de la ventana que invoca para construir el `SessionManager`
+        // que escribe la sesión agregada.
+        let sessions_dir = state.borrow().editor.session_manager.sessions_dir().to_path_buf();
+        let sm = SessionManager::new(sessions_dir);
+        let sv2 = SessionV2 { version: 2, windows: windows_out, active_window };
+        sm.save_auto_session_v2(&sv2).ok();
+    }
+    state.borrow_mut().settings.save().ok();
 }
 
 /// Hallazgo C.7: `perform_hot_exit` guarda el contenido sin guardar de las pestañas de
@@ -664,21 +711,26 @@ pub fn confirm_close_if_needed(ui: &App, state: &SharedState) -> Option<slint::C
     if restore_session {
         return None;
     }
-    let dirty: Vec<(usize, usize)> = {
-        let st = state.borrow();
-        st.editor
-            .groups
-            .iter()
-            .enumerate()
-            .flat_map(|(gi, g)| {
-                g.tabs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| !t.is_scratch() && t.is_dirty())
-                    .map(move |(ti, _)| (gi, ti))
-                    .collect::<Vec<_>>()
-            })
-            .collect()
+    // Bug W2: antes solo miraba las pestañas sucias de ESTA ventana. Con varias ventanas
+    // registradas, cerrar/"Salir" podía perder en silencio los cambios sin guardar de
+    // cualquier OTRA ventana (la sesión completa se sobrescribe de todos modos al cerrar, ver
+    // `perform_hot_exit`, y con "Restaurar sesión" desactivado esa sesión nunca se vuelve a
+    // leer). Ahora recorre todas las ventanas registradas.
+    let dirty: Vec<(u32, usize, usize)> = {
+        let mut out = Vec::new();
+        for id in super::windows::snapshot_ids() {
+            super::windows::with_window(id, |_ui, w_state| {
+                let st = w_state.borrow();
+                for (gi, g) in st.editor.groups.iter().enumerate() {
+                    for (ti, t) in g.tabs.iter().enumerate() {
+                        if !t.is_scratch() && t.is_dirty() {
+                            out.push((id, gi, ti));
+                        }
+                    }
+                }
+            });
+        }
+        out
     };
     if dirty.is_empty() {
         return None;
@@ -701,8 +753,10 @@ pub fn confirm_close_if_needed(ui: &App, state: &SharedState) -> Option<slint::C
             // acaba de pedir explícitamente guardar. `save_tab` ya informa el error en
             // la barra de estado; aquí solo se decide si el cierre puede continuar.
             let mut ok = true;
-            for (g, i) in dirty {
-                ok &= save_tab(ui, state, g, i);
+            for (id, g, i) in dirty {
+                let saved = super::windows::with_window(id, |w_ui, w_state| save_tab(w_ui, w_state, g, i))
+                    .unwrap_or(false);
+                ok &= saved;
             }
             if ok {
                 None

@@ -92,10 +92,6 @@ fn apply_settings_from_ui(ui: &App, state: &SharedState) {
         // `ai_provider` (id) y `ai_consent` no se leen de la UI: los gestiona WS-D
         // (`ai-provider-changed` / diálogo de privacidad).
         st.settings = st.settings.clone().validated();
-        // WSE1b: guardar UNA sola vez aquí (en la ventana que disparó el cambio), no una
-        // vez por ventana — `broadcast_settings_to_other_windows` de abajo solo EMPUJA la
-        // configuración ya guardada a las demás, nunca vuelve a llamar a `.save()`.
-        st.settings.save().ok();
     }
     push_settings_to_ui(ui, state);
     refresh_flags(ui, state);
@@ -112,6 +108,27 @@ fn apply_settings_from_ui(ui: &App, state: &SharedState) {
     if ui.get_show_settings() {
         set_status(ui, "Configuración guardada");
     }
+    // Bug W3: guarda a disco UNA sola vez, actualiza la copia compartida del registro
+    // (`windows::shared_settings`, para que `poll_open_requests` y las ventanas creadas
+    // DESPUÉS de este cambio vean el valor actual en vez del de arranque) y empuja el
+    // resultado a las demás ventanas — todo en un único punto de escritura en vez de
+    // `Settings::save()` ad-hoc por cada sitio que muta `settings`.
+    commit_settings(state);
+}
+
+/// Punto único de escritura de `settings` (bug W3 — antes cada sitio llamaba a
+/// `Settings::save()` por su cuenta y nunca tocaba `windows::shared_settings`, así que la
+/// configuración compartida del registro solo se actualizaba una vez, al arrancar
+/// (`main.rs`). Efecto observado: ventanas nuevas heredaban configuración obsoleta,
+/// `poll_open_requests` decidía con datos viejos, y los recientes/otros ajustes de
+/// distintas ventanas se desincronizaban entre sí y se pisaban al guardar). Todo sitio que
+/// mute `state.borrow_mut().settings` debe llamar a esto en vez de `Settings::save()`
+/// directo: actualiza `windows::shared_settings`, guarda a disco una vez y difunde el valor
+/// nuevo a las demás ventanas registradas (sus copias en memoria Y su UI).
+pub fn commit_settings(state: &SharedState) {
+    let new_settings = state.borrow().settings.clone();
+    super::windows::set_shared_settings(new_settings.clone());
+    new_settings.save().ok();
     broadcast_settings_to_other_windows(state);
 }
 
@@ -174,7 +191,6 @@ fn reset_settings(ui: &App, state: &SharedState) {
         let recent = st.settings.recent_files.clone();
         st.settings = Settings::default();
         st.settings.recent_files = recent;
-        st.settings.save().ok();
         // También aplica el modo de vista por defecto restablecido al modo EN VIVO
         // (ver E4): "Restablecer valores" es una acción explícita del usuario, a
         // diferencia de un `settings-changed()` cualquiera.
@@ -184,6 +200,9 @@ fn reset_settings(ui: &App, state: &SharedState) {
     refresh_flags(ui, state);
     refresh_stats(ui, state, true);
     set_status(ui, "Configuración restablecida");
+    // Bug W3: mismo punto único de escritura que `apply_settings_from_ui` — sin esto, las
+    // demás ventanas seguían con la configuración anterior tras "Restablecer valores".
+    commit_settings(state);
 }
 
 fn open_data_folder(ui: &App) {

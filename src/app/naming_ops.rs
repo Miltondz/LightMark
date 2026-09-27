@@ -75,11 +75,15 @@ fn maybe_auto_name_draft(ui: &App, state: &SharedState) {
     if ui.get_ai_busy() || !ui.get_can_ai() {
         return;
     }
-    let (auto_on, consent, n) = {
+    let (ai_enabled, auto_on, consent, n) = {
         let st = state.borrow();
-        (st.settings.ai_auto_name_drafts, st.settings.ai_consent, 1u32)
+        (st.settings.ai_enabled, st.settings.ai_auto_name_drafts, st.settings.ai_consent, 1u32)
     };
-    if !auto_on || !consent {
+    // Bug de la revisión (privacidad): comprobar `settings.ai_enabled` explícitamente además
+    // de `ui.get_can_ai()` — este último depende del timer de 400ms de `ai_ops::wire`
+    // (`ai_can_ai_timer`), que puede tardar hasta 400ms en reflejar que la IA se acaba de
+    // desactivar. Sin esto, un borrador podía dispararse hacia el proveedor en esa ventana.
+    if !ai_enabled || !auto_on || !consent {
         return;
     }
     let now = Instant::now();
@@ -141,20 +145,20 @@ fn maybe_auto_name_draft(ui: &App, state: &SharedState) {
     let (system, user) = naming::build_prompt(n, &lang, &snippet);
     let hint = (g, i);
     let id = TabId::Scratch(scratch_id);
-    // No capturamos `state` aquí: `Rc<RefCell<_>>` no es `Send` y `done` debe serlo (viaja
-    // dentro del cierre que `spawn` manda a `std::thread::spawn`); se recupera de la TLS de
-    // `ai_ops` en el cuerpo, que solo se ejecuta ya de vuelta en el hilo de la UI.
+    // `spawn` ya localiza la ventana de origen por su id en el registro y vuelve a resolver
+    // su `SharedState` correcto al recibir la respuesta (ver `ai_ops::spawn`) — no hace falta
+    // capturar `state` aquí (`Rc<RefCell<_>>` no es `Send` y `done` debe serlo).
     ai_ops::spawn(
         ui,
+        state,
         move || client::complete(&cfg, &system, &user, 200),
-        move |ui, r| {
+        move |ui, state, r| {
             let raw = match r {
                 Ok(raw) => raw,
                 Err(_) => return, // fallo silencioso: ya no se reintentará (marcado arriba)
             };
             let Some(name) = naming::parse_candidates(&raw, 1).into_iter().next() else { return };
-            let Some(state) = ai_ops::current_state() else { return };
-            let Some((g, i)) = ai_ops::find_tab(&state, hint, &id) else { return }; // pestaña cerrada mientras tanto
+            let Some((g, i)) = ai_ops::find_tab(state, hint, &id) else { return }; // pestaña cerrada mientras tanto
             {
                 let mut st = state.borrow_mut();
                 let Some(t) = st.editor.groups.get_mut(g).and_then(|gr| gr.tabs.get_mut(i)) else { return };
@@ -163,7 +167,7 @@ fn maybe_auto_name_draft(ui: &App, state: &SharedState) {
                 }
                 t.custom_title = Some(name.clone());
             }
-            refresh_tabs(ui, &state);
+            refresh_tabs(ui, state);
             set_status(ui, &format!("IA: borrador renombrado a «{name}»"));
         },
     );

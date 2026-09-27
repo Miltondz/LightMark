@@ -103,6 +103,20 @@ pub fn most_recent() -> Option<u32> {
     REG.with(|r| r.borrow().windows.iter().max_by_key(|w| w.last_active).map(|w| w.id))
 }
 
+/// Marca `session_dirty` en TODAS las ventanas registradas (hallazgo #7 de la revisión):
+/// mover una pestaña a otra ventana o cerrar una ventana cambia la sesión agregada (qué
+/// ventana tiene qué pestañas, o cuántas ventanas hay) sin que ninguna `EditorState`
+/// individual haya cambiado su propio contenido — así que nada marcaba `session_dirty`
+/// antes de esto, y `session_tick_multi` (en `main.rs`) no volvía a guardar la sesión v2
+/// hasta el siguiente cambio de documento cualquiera. Llamar tras cualquier operación
+/// estructural entre ventanas (mover pestaña, cerrar ventana) para que un crash justo
+/// después no pierda ese cambio de estructura hasta el próximo autoguardado de contenido.
+pub fn mark_all_session_dirty() {
+    for_each(|_ui, state| {
+        state.borrow_mut().session_dirty = true;
+    });
+}
+
 /// Copia de los ids registrados en el orden actual, SIN mantener el borrow de `REG` — usar
 /// esto para iterar antes de cualquier operación que pueda re-entrar (diálogos, `show()`,
 /// callbacks cruzados) en vez de `for_each`.
@@ -116,21 +130,29 @@ pub fn snapshot_ids() -> Vec<u32> {
 /// esto es seguro y es la forma preferida; para nada que pueda mostrar un diálogo o
 /// cerrar/crear ventanas, usar `snapshot_ids()` + `with_window` en su lugar.
 pub fn for_each(mut f: impl FnMut(&crate::App, &SharedState)) {
-    REG.with(|r| {
+    // Clonar los handles (App::clone_strong, SharedState = Rc::clone) y soltar el borrow de
+    // `REG` ANTES de llamar a `f`: `f` puede re-entrar en este módulo (p. ej. `activate` ->
+    // `mark_active` -> `REG.borrow_mut()`), lo que con el borrow todavía abierto aquí sería un
+    // `BorrowMutError` (panic). Ver la nota "Regla de oro" al principio del archivo.
+    let handles: Vec<(crate::App, SharedState)> = REG.with(|r| {
         let reg = r.borrow();
-        for w in reg.windows.iter() {
-            f(&w.ui, &w.state);
-        }
+        reg.windows.iter().map(|w| (w.ui.clone_strong(), w.state.clone())).collect()
     });
+    for (ui, state) in &handles {
+        f(ui, state);
+    }
 }
 
-/// Ejecuta `f` con la ventana `id` (si existe), con un borrow corto que se suelta antes de
-/// volver. Preferir esto sobre `for_each` cuando `f` pueda re-entrar en el registro.
+/// Ejecuta `f` con la ventana `id` (si existe). El borrow de `REG` se suelta ANTES de llamar a
+/// `f` (ver `for_each`) para que `f` pueda re-entrar en el registro sin causar un
+/// `BorrowMutError` — por ejemplo, `open_path` llamando a `windows::activate` desde dentro de
+/// un `with_window` sobre otra ventana.
 pub fn with_window<T>(id: u32, f: impl FnOnce(&crate::App, &SharedState) -> T) -> Option<T> {
-    REG.with(|r| {
+    let handle: Option<(crate::App, SharedState)> = REG.with(|r| {
         let reg = r.borrow();
-        reg.windows.iter().find(|w| w.id == id).map(|w| f(&w.ui, &w.state))
-    })
+        reg.windows.iter().find(|w| w.id == id).map(|w| (w.ui.clone_strong(), w.state.clone()))
+    });
+    handle.map(|(ui, state)| f(&ui, &state))
 }
 
 /// HWND Win32 de la ventana `id` (para `SetForegroundWindow` al activarla/desduplicar).
@@ -259,5 +281,86 @@ mod tests {
         assert_eq!(shared_settings().font_size, 99);
         // restaurar para no afectar otros tests en el mismo hilo/proceso
         set_shared_settings(before);
+    }
+
+    // -- Regresión del bug crítico #1 (BorrowMutError por re-entrancia) --------------------
+    //
+    // No se puede construir un `WindowEntry` real (`App`/`SharedState` de Slint) en
+    // `cargo test` headless (ver la nota al principio de este módulo), así que esta prueba
+    // reproduce la FORMA EXACTA del bug sobre un `RefCell` análogo mínimo — el mismo patrón
+    // que tenían `with_window`/`for_each` antes de esta corrección: dos "ventanas" en un
+    // registro compartido, y un cierre `f` que activa OTRA ventana del mismo registro desde
+    // dentro (el escenario real: `open_path` llamando a `windows::activate` desde dentro de
+    // un `with_window` sobre otra ventana — CLI-arg / segunda instancia abriendo un archivo
+    // ya abierto en una ventana que no es la más reciente).
+    //
+    // - `buggy_with_window` reproduce el código ANTERIOR (mantiene `RefCell::borrow()`
+    //   prestado mientras llama a `f`): debe entrar en panic (`BorrowMutError`) cuando `f`
+    //   reentra con un `borrow_mut()`.
+    // - `with_window`/`for_each` (los de este archivo, ya corregidos) no deben entrar en
+    //   panic en el mismo escenario.
+    struct AnalogRegistry {
+        windows: RefCell<Vec<u32>>,
+    }
+
+    impl AnalogRegistry {
+        /// Patrón ANTERIOR al fix: `f` corre con el borrow de `windows` todavía abierto.
+        fn buggy_with_window(&self, id: u32, f: impl FnOnce(u32)) {
+            let windows = self.windows.borrow();
+            if let Some(&w) = windows.iter().find(|&&w| w == id) {
+                f(w);
+            }
+        }
+
+        /// Patrón ACTUAL (igual que `windows::with_window`/`for_each` en este archivo):
+        /// clona lo necesario, suelta el borrow, y SOLO ENTONCES llama a `f`.
+        fn fixed_with_window(&self, id: u32, f: impl FnOnce(u32)) {
+            let found: Option<u32> = {
+                let windows = self.windows.borrow();
+                windows.iter().find(|&&w| w == id).copied()
+            };
+            if let Some(w) = found {
+                f(w);
+            }
+        }
+
+        /// Simula `mark_active`/`activate`: una operación que necesita `borrow_mut()` sobre
+        /// EL MISMO registro — exactamente lo que `windows::activate` hace vía `mark_active`.
+        fn mark_active(&self, id: u32) {
+            let mut windows = self.windows.borrow_mut();
+            if let Some(w) = windows.iter_mut().find(|w| **w == id) {
+                *w = id; // no-op salvo mantener viva la mutación
+            }
+        }
+    }
+
+    #[test]
+    fn buggy_pattern_panics_on_reentrant_activate() {
+        let reg = AnalogRegistry { windows: RefCell::new(vec![1, 2]) };
+        // Ventana 2 (no la más reciente) recibe `open_path` para un archivo ya abierto en la
+        // ventana 1: el código busca la ventana 1 con el borrow abierto y, dentro, intenta
+        // "activarla" (`mark_active`) — un segundo `borrow_mut()` sobre el MISMO RefCell
+        // mientras el primer `borrow()` sigue vivo. Con el patrón viejo, esto panickea.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.buggy_with_window(1, |_w| {
+                reg.mark_active(1); // BorrowMutError: reentra con el borrow externo abierto
+            });
+        }));
+        assert!(result.is_err(), "el patrón viejo debía entrar en panic (BorrowMutError)");
+    }
+
+    #[test]
+    fn fixed_pattern_survives_reentrant_activate() {
+        let reg = AnalogRegistry { windows: RefCell::new(vec![1, 2]) };
+        // Mismo escenario que arriba, pero con el patrón corregido (borrow soltado antes de
+        // llamar a `f`): activar OTRA ventana desde dentro del cierre no debe panickear, tal
+        // como no debe panickear `windows::activate` llamado desde dentro de
+        // `windows::with_window`/`windows::for_each` reales tras esta corrección.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            reg.fixed_with_window(1, |_w| {
+                reg.mark_active(1);
+            });
+        }));
+        assert!(result.is_ok(), "el patrón corregido no debe entrar en panic");
     }
 }

@@ -93,9 +93,28 @@ pub struct AppState {
     /// Estado de la vista del editor (resaltado + gutter); lo rellena WS-A.
     #[allow(dead_code)] // wave-1 fills (WS-A)
     pub view: editor_view_ops::EditorViewState,
-    /// Id monótono de la última petición de IA; las respuestas con id viejo se descartan (WS-D).
-    #[allow(dead_code)] // wave-1 fills (WS-D)
+    /// Id monótono de la última petición de IA DE ESTA VENTANA; las respuestas con id viejo
+    /// se descartan (WS-D). Bug de la revisión post multi-ventana: antes esto era un
+    /// `AtomicU64` GLOBAL en `ai_ops.rs`, así que una solicitud de la ventana B invalidaba el
+    /// id que la ventana A estaba esperando, dejando `ai_busy` de A atascado en `true` para
+    /// siempre. Ahora vive por ventana, en `AppState`, y `ai_ops::spawn` lo usa para decidir
+    /// si una respuesta que llega sigue siendo la más reciente de ESTA ventana.
     pub ai_request_id: u64,
+    /// Pestaña a la que se aplicará el candidato elegido en `NamePickerDialog` (grupo, índice
+    /// en el momento de pedir las sugerencias, identidad estable) — bug de la revisión: antes
+    /// era un `thread_local` GLOBAL (`NAME_TARGET` en `ai_ops.rs`) compartido por todas las
+    /// ventanas, así que una solicitud manual de nombre en la ventana B pisaba el destino
+    /// pendiente de la ventana A, descartando el resultado del diálogo que A esperaba. Ahora
+    /// vive por ventana.
+    pub ai_name_target: Option<(usize, usize, ai_ops::TabId)>,
+    /// Timer de 400 ms que mantiene `can_ai` al día en esta ventana (ver `ai_ops::wire`) — bug
+    /// de la revisión: antes era un `thread_local` GLOBAL (`CAN_AI_TIMER`), así que cablear una
+    /// segunda ventana sobrescribía el slot y soltaba (parando, `slint::Timer` se detiene al
+    /// dropearse) el timer de la PRIMERA ventana, que se quedaba con `can_ai`/el aviso de
+    /// consentimiento congelados en lo que fuera que tuvieran en ese instante — incluyendo
+    /// seguir pareciendo "activada" tras desactivar la IA en otra ventana. Ahora cada ventana
+    /// guarda su propio `Timer` aquí, con vida igual a la de su `AppState`.
+    pub ai_can_ai_timer: Option<slint::Timer>,
 }
 
 pub type SharedState = Rc<RefCell<AppState>>;
@@ -120,6 +139,8 @@ impl AppState {
             external_conflict_warned_for: None,
             view: editor_view_ops::EditorViewState::default(),
             ai_request_id: 0,
+            ai_name_target: None,
+            ai_can_ai_timer: None,
         }
     }
 }

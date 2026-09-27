@@ -519,6 +519,7 @@ fn move_active_tab_to_new_window(ui: &App, state: &SharedState, id: u32, app_dat
             renumber_untitled_against_others(new_id);
             refresh_all_other_windows_titles();
             windows::activate(new_id);
+            windows::mark_all_session_dirty(); // hallazgo #7: nueva ventana + pestaña movida
         }
         Err(e) => {
             // No se pudo crear la ventana destino: devolver la pestaña a su sitio en vez
@@ -556,6 +557,7 @@ fn move_active_tab_to_window(ui: &App, state: &SharedState, id: u32, target_inde
         app::refresh_ui(target_ui, target_state);
     });
     windows::activate(target_id);
+    windows::mark_all_session_dirty(); // hallazgo #7: la pestaña cambió de ventana
     finish_source_after_tab_moved(ui, state, id);
 }
 
@@ -615,6 +617,10 @@ fn close_window_silently(id: u32) {
             drop(entry);
         }
         refresh_all_other_windows_titles();
+        // Hallazgo #7: la sesión agregada cambió (una ventana menos) sin que ninguna
+        // `EditorState` restante haya tocado su propio contenido — marcarlas sucias para
+        // que `session_tick_multi` la vuelva a guardar en el próximo tick.
+        windows::mark_all_session_dirty();
     });
 }
 

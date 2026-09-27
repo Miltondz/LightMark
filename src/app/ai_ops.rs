@@ -13,9 +13,7 @@ use crate::ai::providers::{self, Auth, PROVIDERS};
 use crate::ai::{cache, secrets};
 use crate::editor::Tab;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Longitud mínima (en caracteres, tras recortar espacios) del documento para que valga la
 /// pena pedirle un nombre a la IA (evita gastar una llamada en un borrador casi vacío).
@@ -82,31 +80,18 @@ fn file_default_name(tab: &Tab, name: &str) -> String {
     }
 }
 
-thread_local! {
-    /// Pestaña a la que se aplicará el candidato elegido en `NamePickerDialog` (grupo, índice
-    /// en el momento de pedir las sugerencias, identidad estable). `ai-name-regenerate` y
-    /// `ai-name-picked` la leen; se sobrescribe en cada nueva solicitud manual.
-    static NAME_TARGET: RefCell<Option<(usize, usize, TabId)>> = const { RefCell::new(None) };
-}
-
-/// Id de la solicitud vigente (0 = ninguna). Un resultado con otro id se descarta.
-static ACTIVE: AtomicU64 = AtomicU64::new(0);
-static NEXT: AtomicU64 = AtomicU64::new(1);
-
-thread_local! {
-    static CAN_AI_TIMER: RefCell<Option<slint::Timer>> = const { RefCell::new(None) };
-    /// Copia de `SharedState` accesible desde el cuerpo de un `done` de `spawn` SIN capturarla
-    /// (`SharedState` = `Rc<RefCell<_>>` no es `Send`, y `done` debe serlo para viajar dentro
-    /// del cierre que `spawn` manda a `std::thread::spawn`). El cierre de `done` solo se
-    /// EJECUTA en el hilo de la UI (lo garantiza `upgrade_in_event_loop`), así que leer esta
-    /// TLS ahí siempre encuentra la copia poblada en `wire()` en ese mismo hilo.
-    static STATE_TLS: RefCell<Option<SharedState>> = const { RefCell::new(None) };
-}
-
-/// Copia de `SharedState` para usar dentro de un cuerpo de `done` (hilo de la UI). Ver `STATE_TLS`.
-pub(crate) fn current_state() -> Option<SharedState> {
-    STATE_TLS.with(|c| c.borrow().clone())
-}
+// Bug de la revisión post multi-ventana (privacidad/enrutado de IA): `NAME_TARGET`,
+// `ACTIVE`/`NEXT` y `CAN_AI_TIMER`/`STATE_TLS` eran GLOBALES (un solo `thread_local`/`static`
+// para TODAS las ventanas, aunque todas corran en el mismo hilo de UI de Slint). Con varias
+// ventanas registradas, cablear una segunda ventana pisaba el slot de la primera: solo la
+// ventana más reciente conservaba un picker/timer/id de solicitud vivo, y las respuestas de
+// IA podían aplicarse a la ventana equivocada (o a una ya cerrada) — ver el doc de
+// `ai_request_id`/`ai_name_target`/`ai_can_ai_timer` en `app/mod.rs`, donde vive ahora ese
+// estado, uno por `AppState`. `spawn` ya no necesita una TLS global para recuperar `state`
+// dentro de `done`: localiza la ventana de origen por su id en el registro
+// (`windows::id_of_state`) antes de lanzar el hilo y la vuelve a resolver (`with_window`) al
+// volver al hilo de la UI, en vez de asumir que una única copia global sigue siendo la
+// correcta.
 
 fn strings(v: Vec<String>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(v.into_iter().map(SharedString::from).collect::<Vec<_>>()))
@@ -123,34 +108,57 @@ pub fn compute_can_ai(enabled: bool, needs_key: bool, key_stored: bool, url_edit
 }
 
 /// Lanza `job` en un hilo de fondo; `done` se ejecuta en el hilo de la UI solo si la solicitud
-/// sigue vigente. Devuelve `false` (sin hacer nada) si ya hay una en curso.
+/// sigue vigente PARA ESTA VENTANA. Devuelve `false` (sin hacer nada) si ya hay una en curso o
+/// si `state` no corresponde a ninguna ventana registrada (no hay forma segura de recuperar el
+/// `SharedState` correcto de vuelta en el hilo de la UI en ese caso).
+///
+/// El id de solicitud (`AppState::ai_request_id`) y la resolución de `state` por id de
+/// ventana (en vez de capturarlo directamente: `SharedState` no es `Send`) son POR VENTANA —
+/// antes eran un `AtomicU64`/`thread_local` globales compartidos por todas las ventanas (ver
+/// nota al principio del archivo), así que una solicitud de la ventana B podía invalidar el id
+/// que la ventana A esperaba (dejando `ai_busy` de A atascado en `true`) o hacer que el
+/// resultado de A se aplicara con el `SharedState` de B.
 pub fn spawn<T: Send + 'static>(
     ui: &App,
+    state: &SharedState,
     job: impl FnOnce() -> T + Send + 'static,
-    done: impl FnOnce(&App, T) + Send + 'static,
+    done: impl FnOnce(&App, &SharedState, T) + Send + 'static,
 ) -> bool {
     if ui.get_ai_busy() {
         return false;
     }
-    let id = NEXT.fetch_add(1, Ordering::SeqCst);
-    ACTIVE.store(id, Ordering::SeqCst);
+    let Some(window_id) = super::windows::id_of_state(state) else {
+        return false;
+    };
+    let id = {
+        let mut st = state.borrow_mut();
+        st.ai_request_id = st.ai_request_id.wrapping_add(1);
+        st.ai_request_id
+    };
     ui.set_ai_busy(true);
     let weak = ui.as_weak();
     std::thread::spawn(move || {
         let result = job();
         let _ = weak.upgrade_in_event_loop(move |ui| {
-            if ACTIVE.compare_exchange(id, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-                ui.set_ai_busy(false);
-                done(&ui, result);
+            let Some(cur_state) = super::windows::with_window(window_id, |_ui, s| s.clone()) else {
+                return; // la ventana se cerró mientras la solicitud estaba en curso
+            };
+            if cur_state.borrow().ai_request_id != id {
+                return; // una solicitud MÁS NUEVA de esta misma ventana invalidó esta respuesta
             }
+            ui.set_ai_busy(false);
+            done(&ui, &cur_state, result);
         });
     });
     true
 }
 
-/// Cancela la solicitud en curso: su resultado se ignorará al llegar.
-pub fn cancel(ui: &App) {
-    ACTIVE.store(0, Ordering::SeqCst);
+/// Cancela la solicitud en curso EN ESTA VENTANA: su resultado se ignorará al llegar (el
+/// siguiente `ai_request_id` ya no coincidirá).
+pub fn cancel(ui: &App, state: &SharedState) {
+    let mut st = state.borrow_mut();
+    st.ai_request_id = st.ai_request_id.wrapping_add(1);
+    drop(st);
     ui.set_ai_busy(false);
     ui.set_ai_status("Operación cancelada.".into());
 }
@@ -195,7 +203,12 @@ fn current_config(ui: &App, state: &SharedState) -> Result<AiConfig, AiError> {
 
 fn on_provider_changed(ui: &App, state: &SharedState, idx: i32) {
     let p = PROVIDERS.get(idx.max(0) as usize).unwrap_or(&PROVIDERS[0]);
-    ACTIVE.store(0, Ordering::SeqCst);
+    // Invalida cualquier solicitud en curso DE ESTA VENTANA (antes: `ACTIVE.store(0, ..)`
+    // global, ver nota al principio del archivo).
+    {
+        let mut st = state.borrow_mut();
+        st.ai_request_id = st.ai_request_id.wrapping_add(1);
+    }
     ui.set_ai_busy(false);
     let cached = cache::cached_models(p.id);
     let model = if p.cheap_model.is_empty() { cached.first().cloned().unwrap_or_default() } else { p.cheap_model.to_string() };
@@ -205,8 +218,9 @@ fn on_provider_changed(ui: &App, state: &SharedState, idx: i32) {
         st.settings.ai_provider = p.id.to_string();
         st.settings.ai_model = model.clone();
         st.settings.ai_base_url = base.clone();
-        st.settings.save().ok();
     }
+    // Bug W3: punto único de escritura de settings.
+    super::settings_ops::commit_settings(state);
     ui.set_ai_model(model.into());
     ui.set_ai_base_url(base.into());
     ui.set_ai_key_input("".into());
@@ -242,7 +256,7 @@ fn on_delete_key(ui: &App) {
 
 fn on_test_connection(ui: &App, state: &SharedState) {
     if ui.get_ai_busy() {
-        cancel(ui); // el botón se convierte en "Cancelar" mientras hay una solicitud en curso
+        cancel(ui, state); // el botón se convierte en "Cancelar" mientras hay una solicitud en curso
         return;
     }
     let cfg = match current_config(ui, state) {
@@ -255,8 +269,9 @@ fn on_test_connection(ui: &App, state: &SharedState) {
     ui.set_ai_status("Probando conexión…".into());
     spawn(
         ui,
+        state,
         move || client::test_connection(&cfg),
-        |ui, r| match r {
+        |ui, _state, r| match r {
             Ok(msg) => ui.set_ai_status(msg.into()),
             Err(e) => ui.set_ai_status(error_text(&e).into()),
         },
@@ -265,7 +280,7 @@ fn on_test_connection(ui: &App, state: &SharedState) {
 
 fn on_refresh_models(ui: &App, state: &SharedState) {
     if ui.get_ai_busy() {
-        cancel(ui);
+        cancel(ui, state);
         return;
     }
     let cfg = match current_config(ui, state) {
@@ -276,12 +291,13 @@ fn on_refresh_models(ui: &App, state: &SharedState) {
     ui.set_ai_status("Actualizando lista de modelos…".into());
     spawn(
         ui,
+        state,
         move || {
             let list = client::list_models(&cfg)?;
             cache::put(pid, list.clone()).ok(); // un fallo de caché no invalida la lista
             Ok::<Vec<String>, AiError>(list)
         },
-        move |ui, r| match r {
+        move |ui, _state, r| match r {
             Ok(list) => {
                 let n = list.len();
                 if selected_provider(ui).id == pid {
@@ -376,15 +392,16 @@ fn request_name_suggestions(ui: &App, state: &SharedState, g: usize, i: usize) {
         return ui.set_ai_status(error_text(&e).into());
     }
     let (system, user) = naming::build_prompt(n, &lang, &snippet);
-    NAME_TARGET.with(|c| *c.borrow_mut() = Some((g, i, id.clone())));
+    state.borrow_mut().ai_name_target = Some((g, i, id.clone()));
     ui.set_ai_status("IA: generando sugerencias de nombre…".into());
 
     let hint = (g, i);
     let single = n == 1;
     let started = spawn(
         ui,
+        state,
         move || client::complete(&cfg, &system, &user, 300),
-        move |ui, r| match r {
+        move |ui, state, r| match r {
             Ok(raw) => {
                 let cands = naming::parse_candidates(&raw, n as usize);
                 if cands.is_empty() {
@@ -392,11 +409,7 @@ fn request_name_suggestions(ui: &App, state: &SharedState, g: usize, i: usize) {
                     return;
                 }
                 if single {
-                    // `state` no se puede capturar en `done` (no es `Send`); se recupera de la
-                    // TLS poblada en `wire()` — este cuerpo solo corre en el hilo de la UI.
-                    if let Some(state) = current_state() {
-                        apply_name_choice(ui, &state, hint, &id, &cands[0]);
-                    }
+                    apply_name_choice(ui, state, hint, &id, &cands[0]);
                     return;
                 }
                 ui.set_ai_name_suggestions(strings(cands.clone()));
@@ -424,7 +437,14 @@ fn on_suggest_name(ui: &App, state: &SharedState) {
         set_status(ui, "IA: ya hay una solicitud en curso.");
         return;
     }
-    if !ui.get_can_ai() {
+    // Bug de la revisión (privacidad): `ui.get_can_ai()` depende del timer de 400ms
+    // (`ai_can_ai_timer`, ver `wire`) que podría no haber corrido todavía tras desactivar la
+    // IA en Configuración (o, con el bug ya corregido de timers globales compartidos,
+    // simplemente no haber tenido su tick aún) — comprobar también `settings.ai_enabled`
+    // directamente evita disparar una solicitud (y mandar el snippet del documento al
+    // proveedor) en esa ventana de tiempo.
+    let ai_enabled = state.borrow().settings.ai_enabled;
+    if !ai_enabled || !ui.get_can_ai() {
         sync_provider_ui(ui, state);
         ui.set_ai_status("Configura la IA (proveedor y clave) para poder sugerir nombres.".into());
         ui.set_show_ai_settings(true);
@@ -438,7 +458,6 @@ fn on_suggest_name(ui: &App, state: &SharedState) {
 }
 
 pub fn wire(ui: &App, state: &SharedState) {
-    STATE_TLS.with(|c| *c.borrow_mut() = Some(state.clone()));
     ui.set_ai_provider_names(strings(PROVIDERS.iter().map(|p| p.name.to_string()).collect()));
     sync_provider_ui(ui, state);
 
@@ -513,7 +532,7 @@ pub fn wire(ui: &App, state: &SharedState) {
         let state = state.clone();
         move |s| {
             if let Some(ui) = ui_weak.upgrade() {
-                match NAME_TARGET.with(|c| c.borrow().clone()) {
+                match state.borrow().ai_name_target.clone() {
                     Some((g, i, id)) => apply_name_choice(&ui, &state, (g, i), &id, &s),
                     None => set_status(&ui, "IA: no hay una sugerencia pendiente."),
                 }
@@ -528,7 +547,7 @@ pub fn wire(ui: &App, state: &SharedState) {
                 if ui.get_ai_busy() {
                     return;
                 }
-                let Some((g, i, id)) = NAME_TARGET.with(|c| c.borrow().clone()) else { return };
+                let Some((g, i, id)) = state.borrow().ai_name_target.clone() else { return };
                 match find_tab(&state, (g, i), &id) {
                     Some((gg, ii)) => request_name_suggestions(&ui, &state, gg, ii),
                     None => {
@@ -560,16 +579,29 @@ pub fn wire(ui: &App, state: &SharedState) {
                 ui.set_can_ai(ok);
             }
             if ui.get_ai_enabled() {
-                if let Ok(mut st) = state.try_borrow_mut() {
-                    if !st.settings.ai_consent {
-                        st.settings.ai_consent = true;
-                        st.settings.save().ok();
+                let needs_commit = {
+                    match state.try_borrow_mut() {
+                        Ok(mut st) if !st.settings.ai_consent => {
+                            st.settings.ai_consent = true;
+                            true
+                        }
+                        _ => false,
                     }
+                };
+                if needs_commit {
+                    // Bug W3: mismo punto único de escritura de settings que el resto de la
+                    // app — antes esto llamaba a `Settings::save()` directo, sin actualizar
+                    // `windows::shared_settings` ni empujar el consentimiento a las demás
+                    // ventanas.
+                    super::settings_ops::commit_settings(&state);
                 }
             }
         }
     });
-    CAN_AI_TIMER.with(|t| *t.borrow_mut() = Some(timer));
+    // Bug de la revisión (privacidad): guardar el `Timer` en `AppState` en vez de en un
+    // `thread_local` global — con varias ventanas, cablear la segunda pisaba el timer de la
+    // primera (`slint::Timer` se detiene al dropearse), dejando su `can_ai` congelado.
+    state.borrow_mut().ai_can_ai_timer = Some(timer);
 }
 
 #[cfg(test)]

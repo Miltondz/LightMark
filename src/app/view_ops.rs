@@ -217,8 +217,11 @@ fn set_font_size(ui: &App, state: &SharedState, size: u32) {
     {
         let mut st = state.borrow_mut();
         st.settings.font_size = size;
-        st.settings.save().ok();
     }
+    // Bug W3: guardar directamente con `Settings::save()` aquí dejaba la copia
+    // compartida del registro (`windows::shared_settings`) y las demás ventanas
+    // desincronizadas del zoom aplicado en esta — usar el punto único de escritura.
+    super::settings_ops::commit_settings(state);
     ui.set_font_size(size as i32);
     ui.set_zoom_level(size as f32 / 14.0);
     // Hallazgo W21: la vista previa no se refrescaba al hacer zoom (Ctrl+=/Ctrl+-/
