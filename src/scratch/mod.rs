@@ -483,6 +483,208 @@ fn sanitize_filename(name: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Nombres de borradores (WS-B): metadatos cosméticos; los ids en disco no cambian.
+// ---------------------------------------------------------------------------
+
+/// Opciones de nombrado derivadas de `Settings` (ver `NamingOpts::from_settings`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NamingOpts {
+    pub auto_name: bool,
+    /// 0 ninguna, 1 dd-mm-aaaa, 2 aaaa-mm-dd
+    pub date_format: u32,
+    /// 0 prefijo, 1 sufijo
+    pub date_position: u32,
+    pub date_in_tab: bool,
+}
+
+impl Default for NamingOpts {
+    fn default() -> Self {
+        Self { auto_name: true, date_format: 0, date_position: 1, date_in_tab: false }
+    }
+}
+
+impl NamingOpts {
+    pub fn from_settings(s: &crate::settings::Settings) -> Self {
+        Self {
+            auto_name: s.draft_auto_name,
+            date_format: s.draft_date_format.min(2),
+            date_position: s.draft_date_position.min(1),
+            date_in_tab: s.draft_date_in_tab,
+        }
+    }
+}
+
+const RESERVED_NAMES: [&str; 22] = [
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Limpia un texto para usarlo como nombre de archivo (sin extensión). Vacío si no queda nada.
+pub fn sanitize_file_stem(s: &str) -> String {
+    let replaced: String = s
+        .chars()
+        .map(|c| {
+            if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    let collapsed = replaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut out = collapsed.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    const MAX: usize = 60;
+    if out.chars().count() > MAX {
+        let cut = out.char_indices().nth(MAX).map(|(i, _)| i).unwrap_or(out.len());
+        let head = &out[..cut];
+        // Preferir cortar en el último espacio si queda al menos 30 caracteres.
+        let end = match head.rfind(' ') {
+            Some(sp) if head[..sp].chars().count() >= 30 => sp,
+            _ => cut,
+        };
+        out = out[..end].trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    }
+    let first_seg = out.split('.').next().unwrap_or("").trim().to_ascii_uppercase();
+    if RESERVED_NAMES.contains(&first_seg.as_str()) {
+        out.push('_');
+    }
+    out
+}
+
+/// Título automático a partir del contenido: primer encabezado ATX (en las primeras 50 líneas) o
+/// primera línea no vacía; máx. 6 palabras; saneado. Lee como mucho ~4 KB.
+pub fn auto_title(doc: &Rope) -> Option<String> {
+    let mut lines: Vec<String> = Vec::new();
+    let mut bytes = 0usize;
+    for lr in doc.lines(LineType::Unicode).take(50) {
+        let l: String = lr.to_string().chars().take(300).collect();
+        bytes += l.len();
+        lines.push(l);
+        if bytes >= 4096 {
+            break;
+        }
+    }
+    // 1) encabezado ATX: "# texto"
+    for l in &lines {
+        let t = l.trim();
+        if t.starts_with('#') {
+            let rest = t.trim_start_matches('#');
+            if rest.starts_with(' ') || rest.starts_with('\t') {
+                if let Some(x) = clean_title_line(rest) {
+                    return Some(x);
+                }
+            }
+        }
+    }
+    // 2) primera línea con texto útil
+    for l in &lines {
+        if l.trim().is_empty() {
+            continue;
+        }
+        if let Some(x) = clean_title_line(l) {
+            return Some(x);
+        }
+    }
+    None
+}
+
+fn clean_title_line(line: &str) -> Option<String> {
+    let noise_lead = |c: char| c.is_whitespace() || matches!(c, '#' | '>' | '-' | '*' | '_' | '`' | '{' | '[' | '"' | '\'' | '=' | '~');
+    let noise_trail = |c: char| c.is_whitespace() || matches!(c, '}' | ']' | '"' | '\'' | ',' | ':' | ';' | '*' | '_' | '`' | '{' | '[');
+    let t = line.trim_start_matches(noise_lead).trim_end_matches(noise_trail);
+    if !t.chars().any(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let words: Vec<&str> = t.split_whitespace().take(6).collect();
+    let s = sanitize_file_stem(&words.join(" "));
+    if s.chars().any(|c| c.is_alphanumeric()) { Some(s) } else { None }
+}
+
+/// Fecha `unix` (segundos) en el formato pedido con un desfase explícito (testeable).
+pub fn format_date_with_offset(unix: u64, fmt: u32, offset: time::UtcOffset) -> Option<String> {
+    if fmt == 0 {
+        return None;
+    }
+    let dt = time::OffsetDateTime::from_unix_timestamp(unix as i64).ok()?.to_offset(offset);
+    let (y, m, d) = (dt.year(), dt.month() as u8, dt.day());
+    Some(match fmt {
+        1 => format!("{:02}-{:02}-{:04}", d, m, y),
+        _ => format!("{:04}-{:02}-{:02}", y, m, d),
+    })
+}
+
+/// Fecha en hora local (fallback UTC si el SO no da el desfase).
+pub fn format_date(unix: u64, fmt: u32) -> Option<String> {
+    let off = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+    format_date_with_offset(unix, fmt, off)
+}
+
+pub fn now_unix() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// `position`: 0 prefijo ("26-09-2026 Nota"), otro sufijo ("Nota 26-09-2026").
+pub fn compose_name(base: &str, date: Option<String>, position: u32) -> String {
+    match date {
+        None => base.to_string(),
+        Some(d) if position == 0 => format!("{} {}", d, base),
+        Some(d) => format!("{} {}", base, d),
+    }
+}
+
+/// Extensión de archivo para un id de lenguaje de `editor::detect_language`.
+pub fn extension_for_language(lang: &str) -> &'static str {
+    match lang {
+        "json" => "json",
+        "sql" => "sql",
+        "html" => "html",
+        "xml" => "xml",
+        "javascript" => "js",
+        "typescript" => "ts",
+        "rust" => "rs",
+        "python" => "py",
+        "toml" => "toml",
+        "yaml" => "yaml",
+        "css" => "css",
+        "shell" => "sh",
+        "powershell" => "ps1",
+        "ini" => "ini",
+        "c" => "c",
+        "cpp" => "cpp",
+        "csharp" => "cs",
+        "java" => "java",
+        "go" => "go",
+        "lua" => "lua",
+        _ => "md",
+    }
+}
+
+/// Hace únicos (sin distinguir mayúsculas) los nombres de una lista: "a.md", "a (2).md", ...
+pub fn dedupe_file_names(names: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    names
+        .into_iter()
+        .map(|n| {
+            if seen.insert(n.to_lowercase()) {
+                return n;
+            }
+            let (stem, ext) = match n.rfind('.') {
+                Some(i) if i > 0 => (n[..i].to_string(), n[i..].to_string()),
+                _ => (n.clone(), String::new()),
+            };
+            let mut k = 2;
+            loop {
+                let cand = format!("{} ({}){}", stem, k, ext);
+                if seen.insert(cand.to_lowercase()) {
+                    return cand;
+                }
+                k += 1;
+            }
+        })
+        .collect()
+}
+
 /// Export archived documents to a folder structure
 /// Creates: Archives/<date>/<time>-<name>/<files> + session.json
 pub fn export_to_folder(
@@ -560,6 +762,16 @@ fn resolve_conflict(path: &Path) -> PathBuf {
 
 /// Export archived documents as a ZIP file
 pub fn export_to_zip(archived_docs: &[ScratchDocument], dest_path: &Path) -> std::io::Result<()> {
+    export_to_zip_named(archived_docs, None, dest_path)
+}
+
+/// Como `export_to_zip`; si `names` (uno por documento, ya saneados/únicos) se da, se usan como
+/// nombres de entrada tal cual en vez de `NN-<auto_name>.<ext>`.
+pub fn export_to_zip_named(
+    archived_docs: &[ScratchDocument],
+    names: Option<&[String]>,
+    dest_path: &Path,
+) -> std::io::Result<()> {
     use std::io::Write;
 
     // We create a simple ZIP without external deps using a minimal implementation
@@ -587,7 +799,10 @@ pub fn export_to_zip(archived_docs: &[ScratchDocument], dest_path: &Path) -> std
             .take_while(|c| *c != '+')
             .collect::<String>();
 
-        let filename = format!("{:02}-{}.{}", i + 1, name, ext);
+        let filename = match names.and_then(|n| n.get(i)) {
+            Some(n) => n.clone(),
+            None => format!("{:02}-{}.{}", i + 1, name, ext),
+        };
         let content = doc.document.to_string();
         let crc = crc32(content.as_bytes());
 
@@ -1003,5 +1218,78 @@ mod tests {
             detect_language("INSERT INTO users (id) VALUES (1)"),
             Some("sql".to_string())
         );
+    }
+
+    // --- WS-B: nombres ---
+
+    fn rope(s: &str) -> Rope {
+        Rope::from_str(s)
+    }
+
+    #[test]
+    fn ws_b_sanitize_file_stem_table() {
+        assert_eq!(sanitize_file_stem("a/b:c"), "a b c");
+        assert_eq!(sanitize_file_stem("  hola   mundo.. "), "hola mundo");
+        assert_eq!(sanitize_file_stem("Año nuevo ñandú"), "Año nuevo ñandú");
+        assert_eq!(sanitize_file_stem("fiesta 🎉 hoy"), "fiesta 🎉 hoy");
+        assert_eq!(sanitize_file_stem("con"), "con_");
+        assert_eq!(sanitize_file_stem("NUL"), "NUL_");
+        assert_eq!(sanitize_file_stem("com1"), "com1_");
+        assert_eq!(sanitize_file_stem("lpt9.txt"), "lpt9.txt_");
+        assert_eq!(sanitize_file_stem("console"), "console");
+        assert_eq!(sanitize_file_stem("<>|?*\\\""), "");
+        assert_eq!(sanitize_file_stem("a\u{7}b\tc"), "a b c");
+        let long = "palabra ".repeat(20);
+        let s = sanitize_file_stem(&long);
+        assert!(s.chars().count() <= 60 && !s.ends_with(' '), "{s}");
+        let nosp = "ñ".repeat(100);
+        assert_eq!(sanitize_file_stem(&nosp).chars().count(), 60);
+    }
+
+    #[test]
+    fn ws_b_auto_title_cases() {
+        assert_eq!(auto_title(&rope("# Plan de viaje\ncuerpo")), Some("Plan de viaje".into()));
+        assert_eq!(auto_title(&rope("intro\n\n## Segundo título\n")), Some("Segundo título".into()));
+        assert_eq!(auto_title(&rope("\n\n  Primera línea útil  \nsegunda")), Some("Primera línea útil".into()));
+        assert_eq!(auto_title(&rope("uno dos tres cuatro cinco seis siete ocho")), Some("uno dos tres cuatro cinco seis".into()));
+        assert_eq!(auto_title(&rope("")), None);
+        assert_eq!(auto_title(&rope("   \n\n")), None);
+        assert_eq!(auto_title(&rope("---\n***\n")), None);
+        assert_eq!(auto_title(&rope("{\n  \"nombre\": \"Ñu\"\n}")), Some("nombre Ñu".into()));
+        assert_eq!(auto_title(&rope("> - **Lista** importante")), Some("Lista importante".into()));
+        assert_eq!(auto_title(&rope("con/aux:?")), Some("con aux".into()));
+        assert_eq!(auto_title(&rope("CON")), Some("CON_".into()));
+        assert_eq!(auto_title(&rope("😀 fiesta")), Some("😀 fiesta".into()));
+        let long = format!("{}\nx", "a".repeat(5000));
+        assert_eq!(auto_title(&rope(&long)).unwrap().chars().count(), 60);
+        assert_eq!(auto_title(&rope("#hashtag sin espacio")), Some("hashtag sin espacio".into()));
+    }
+
+    #[test]
+    fn ws_b_format_date_and_compose() {
+        // 2026-09-05 12:00:00 UTC
+        let ts = 1_788_609_600u64;
+        let utc = time::UtcOffset::UTC;
+        assert_eq!(format_date_with_offset(ts, 1, utc).as_deref(), Some("05-09-2026"));
+        assert_eq!(format_date_with_offset(ts, 2, utc).as_deref(), Some("2026-09-05"));
+        assert_eq!(format_date_with_offset(ts, 0, utc), None);
+        // desfase: 23:00 UTC + 2h cruza de día
+        let off = time::UtcOffset::from_hms(2, 0, 0).unwrap();
+        assert_eq!(format_date_with_offset(ts + 11 * 3600, 2, off).as_deref(), Some("2026-09-06"));
+        // fallback local: nunca falla
+        assert!(format_date(ts, 1).is_some());
+        assert_eq!(compose_name("Nota", Some("05-09-2026".into()), 0), "05-09-2026 Nota");
+        assert_eq!(compose_name("Nota", Some("05-09-2026".into()), 1), "Nota 05-09-2026");
+        assert_eq!(compose_name("Nota", None, 0), "Nota");
+    }
+
+    #[test]
+    fn ws_b_extension_and_zip_dedupe() {
+        assert_eq!(extension_for_language("json"), "json");
+        assert_eq!(extension_for_language("plaintext"), "md");
+        assert_eq!(extension_for_language("markdown"), "md");
+        assert_eq!(extension_for_language("csharp"), "cs");
+        let v = dedupe_file_names(vec!["a.md".into(), "A.md".into(), "b.md".into(), "a.md".into(), "x".into(), "x".into()]);
+        assert_eq!(v, ["a.md", "A (2).md", "b.md", "a (3).md", "x", "x (2)"]);
     }
 }

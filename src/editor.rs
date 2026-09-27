@@ -129,11 +129,25 @@ pub struct Tab {
     /// (hallazgo C1): en ese caso no se debe autoguardar para no sobrescribir el archivo
     /// original en disco con contenido vacío.
     pub autosave_enabled: bool,
+    /// N de "Sin título N" mientras el borrador no tiene nombre propio/automático.
+    pub untitled_n: Option<u32>,
+    /// Nombre puesto por el usuario/IA (prevalece sobre el automático).
+    pub custom_title: Option<String>,
+    /// Momento de creación del borrador (segundos Unix; estable; para la fecha del nombre).
+    pub created_unix: u64,
+    /// Nombre derivado del contenido (caché, lo recalcula `EditorState::recompute_titles`).
+    pub auto_title: Option<String>,
+}
+
+/// Extrae N de "Sin título N".
+pub fn parse_untitled_n(title: &str) -> Option<u32> {
+    title.strip_prefix("Sin título ")?.trim().parse::<u32>().ok().filter(|n| *n > 0)
 }
 
 impl Tab {
     /// Crea una pestaña de borrador (autoguardado, nunca "sucia").
     pub fn new_scratch(scratch_id: String, document: Rope, title: String) -> Self {
+        let title_copy = title.clone();
         Self {
             title,
             document: document.clone(),
@@ -149,6 +163,10 @@ impl Tab {
             line_ending: crate::textops::LineEnding::Lf,
             had_bom: false,
             autosave_enabled: true,
+            untitled_n: parse_untitled_n(&title_copy),
+            custom_title: None,
+            created_unix: crate::scratch::now_unix(),
+            auto_title: None,
         }
     }
 
@@ -174,7 +192,51 @@ impl Tab {
             line_ending: crate::textops::LineEnding::Lf,
             had_bom: false,
             autosave_enabled: true,
+            untitled_n: None,
+            custom_title: None,
+            created_unix: 0,
+            auto_title: None,
         }
+    }
+
+    /// Título mostrado de un borrador según las opciones (archivos: su nombre).
+    pub fn naming_display_title(&self, o: &crate::scratch::NamingOpts) -> String {
+        if !self.is_scratch() {
+            return self.title.clone();
+        }
+        let base = self.draft_base_name(o);
+        if o.date_in_tab {
+            crate::scratch::compose_name(&base, crate::scratch::format_date(self.created_unix, o.date_format), o.date_position)
+        } else {
+            base
+        }
+    }
+
+    /// Nombre base de un borrador: propio > automático > "Sin título N".
+    fn draft_base_name(&self, o: &crate::scratch::NamingOpts) -> String {
+        if let Some(c) = self.custom_title.as_ref().filter(|c| !c.trim().is_empty()) {
+            return c.clone();
+        }
+        if o.auto_name && let Some(a) = &self.auto_title {
+            return a.clone();
+        }
+        format!("Sin título {}", self.untitled_n.unwrap_or(1))
+    }
+
+    /// Nombre propuesto al guardar (Guardar como / ZIP): base + fecha (si hay formato) + extensión.
+    pub fn proposed_file_name(&self, o: &crate::scratch::NamingOpts, lang: &str) -> String {
+        if !self.is_scratch() {
+            // No duplicar la extensión (".md.md"); añadir ".md" solo si no trae ninguna.
+            return if Path::new(&self.title).extension().is_some() {
+                self.title.clone()
+            } else {
+                format!("{}.md", self.title)
+            };
+        }
+        let base = crate::scratch::sanitize_file_stem(&self.draft_base_name(o));
+        let base = if base.is_empty() { "Sin título".to_string() } else { base };
+        let named = crate::scratch::compose_name(&base, crate::scratch::format_date(self.created_unix, o.date_format), o.date_position);
+        format!("{}.{}", named, crate::scratch::extension_for_language(lang))
     }
 
     /// `true` si es un borrador (autoguardado en el directorio de scratch).
@@ -296,7 +358,7 @@ impl Tab {
     pub fn tooltip(&self) -> String {
         match &self.file_path {
             Some(p) => p.to_string_lossy().to_string(),
-            None => "Borrador (se guarda automáticamente)".to_string(),
+            None => format!("Borrador — {} (se guarda automáticamente)", self.title),
         }
     }
 }
@@ -528,21 +590,103 @@ impl EditorState {
     /// en vez de "Sin título 1" fijo (que podía duplicar el título de un borrador ya
     /// abierto en otro grupo).
     pub(crate) fn smallest_unused_scratch_number(&self) -> usize {
-        let mut used = std::collections::HashSet::new();
-        for g in &self.groups {
-            for t in &g.tabs {
-                if let Some(rest) = t.title.strip_prefix("Sin título ")
-                    && let Ok(n) = rest.trim().parse::<usize>()
-                {
-                    used.insert(n);
-                }
-            }
-        }
-        let mut n = 1usize;
-        while used.contains(&n) {
+        self.next_untitled_number(&std::collections::HashSet::new()) as usize
+    }
+
+    /// Números "Sin título N" en uso por borradores sin nombre propio/automático (todos los grupos).
+    pub fn used_untitled_numbers(&self) -> std::collections::HashSet<u32> {
+        self.groups
+            .iter()
+            .flat_map(|g| g.tabs.iter())
+            .filter(|t| t.is_scratch() && t.custom_title.is_none() && t.auto_title.is_none())
+            .filter_map(|t| t.untitled_n)
+            .collect()
+    }
+
+    /// Menor entero positivo libre (`extra_used`: números en uso en otras ventanas).
+    pub fn next_untitled_number(&self, extra_used: &std::collections::HashSet<u32>) -> u32 {
+        let used = self.used_untitled_numbers();
+        let mut n = 1u32;
+        while used.contains(&n) || extra_used.contains(&n) {
             n += 1;
         }
         n
+    }
+
+    /// Recalcula nombre automático, números "Sin título N" y `title` de todos los borradores.
+    /// Devuelve `true` si algún título cambió. Los ids de scratch en disco no se tocan.
+    pub fn recompute_titles(&mut self, o: &crate::scratch::NamingOpts) -> bool {
+        for g in self.groups.iter_mut() {
+            for t in g.tabs.iter_mut().filter(|t| t.is_scratch()) {
+                t.auto_title = if o.auto_name && t.custom_title.is_none() {
+                    crate::scratch::auto_title(&t.document)
+                } else {
+                    None
+                };
+            }
+        }
+        // Números: conservar los únicos ya asignados; asignar el menor libre a los demás.
+        let mut used = std::collections::HashSet::new();
+        for g in self.groups.iter_mut() {
+            for t in g.tabs.iter_mut().filter(|t| t.is_scratch()) {
+                if t.custom_title.is_some() || t.auto_title.is_some() {
+                    t.untitled_n = None;
+                } else if let Some(n) = t.untitled_n {
+                    if !used.insert(n) {
+                        t.untitled_n = None;
+                    }
+                }
+            }
+        }
+        let mut next = 1u32;
+        for g in self.groups.iter_mut() {
+            for t in g.tabs.iter_mut().filter(|t| t.is_scratch()) {
+                if t.custom_title.is_none() && t.auto_title.is_none() && t.untitled_n.is_none() {
+                    while used.contains(&next) {
+                        next += 1;
+                    }
+                    used.insert(next);
+                    t.untitled_n = Some(next);
+                }
+            }
+        }
+        let mut changed = false;
+        for g in self.groups.iter_mut() {
+            for t in g.tabs.iter_mut().filter(|t| t.is_scratch()) {
+                let title = t.naming_display_title(o);
+                if title != t.title {
+                    t.title = title;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Mueve la pestaña `from` a la posición de hueco `to` (0..=len, en índices ANTES de mover)
+    /// dentro del grupo. La pestaña activa sigue siendo la misma. `true` si hubo cambio.
+    pub fn move_tab(&mut self, group: usize, from: usize, to: usize) -> bool {
+        let Some(g) = self.groups.get_mut(group) else { return false };
+        let len = g.tabs.len();
+        if from >= len || to > len || to == from || to == from + 1 {
+            return false;
+        }
+        let insert = if to > from { to - 1 } else { to };
+        let tab = g.tabs.remove(from);
+        g.tabs.insert(insert, tab);
+        g.active = if g.active == from {
+            insert
+        } else {
+            let mut a = g.active;
+            if a > from {
+                a -= 1;
+            }
+            if a >= insert {
+                a += 1;
+            }
+            a
+        };
+        true
     }
 
     /// Crea una nueva pestaña de borrador en el grupo activo, titulada "Sin título N" con la N
@@ -651,6 +795,9 @@ impl EditorState {
                         .unwrap_or_else(|| format!("tab-{}", i)),
                     path: t.file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
                     title: t.title.clone(),
+                    custom_title: t.custom_title.clone(),
+                    created_at: if t.is_scratch() { Some(t.created_unix) } else { None },
+                    untitled_n: t.untitled_n,
                     is_scratch: t.is_scratch(),
                     cursor: t.cursor,
                     scroll_line: 0,
@@ -722,6 +869,11 @@ impl EditorState {
                     };
                     let mut tab = Tab::new_scratch(ts.document_id.clone(), rope, title);
                     tab.autosave_enabled = autosave_enabled;
+                    tab.custom_title = ts.custom_title.clone().filter(|c| !c.trim().is_empty());
+                    tab.created_unix = ts.created_at.unwrap_or_else(crate::scratch::now_unix);
+                    // Renumeración compacta (1..k) al restaurar: los "Sin título N" legados
+                    // solo sirven para saber que era un borrador sin nombre.
+                    tab.untitled_n = None;
                     tab.cursor = clamp_cursor_to_document(&tab.document, ts.cursor);
                     tabs.push(tab);
                 } else if let Some(path_str) = &ts.path {
@@ -823,6 +975,7 @@ impl EditorState {
 
         self.active_group = session.active_group.min(groups.len() - 1);
         self.groups = groups;
+        self.recompute_titles(&crate::scratch::NamingOpts::default());
         if let Some(root) = &session.workspace_root {
             self.workspace_root = Some(PathBuf::from(root));
         }
@@ -1143,7 +1296,8 @@ mod tests {
         let mut tab = Tab::new_scratch("s1".to_string(), Rope::from_str("hi"), "Sin título 1".to_string());
         tab.document = Rope::from_str("hi changed");
         assert!(!tab.is_dirty());
-        assert_eq!(tab.tooltip(), "Borrador (se guarda automáticamente)");
+        // WS-B: la tooltip de un borrador ahora incluye su nombre (plan §7.1).
+        assert_eq!(tab.tooltip(), "Borrador — Sin título 1 (se guarda automáticamente)");
     }
 
     #[test]
@@ -1302,6 +1456,9 @@ mod tests {
                     pinned: false,
                     unsaved_content: None,
                     mtime: None,
+                    custom_title: None,
+                    created_at: None,
+                    untitled_n: None,
                 }],
                 active_tab: 0,
             }],
@@ -1336,6 +1493,9 @@ mod tests {
                     pinned: false,
                     unsaved_content: None,
                     mtime: None,
+                    custom_title: None,
+                    created_at: None,
+                    untitled_n: None,
                 }],
                 active_tab: 99, // fuera de rango a propósito
             }],
@@ -1415,6 +1575,9 @@ mod tests {
                     pinned: false,
                     unsaved_content: Some("contenido sin guardar".to_string()),
                     mtime: None,
+                    custom_title: None,
+                    created_at: None,
+                    untitled_n: None,
                 }],
                 active_tab: 0,
             }],
@@ -1450,6 +1613,9 @@ mod tests {
                     pinned: false,
                     unsaved_content: None,
                     mtime: Some(0), // Deliberadamente distinto al mtime real del archivo.
+                    custom_title: None,
+                    created_at: None,
+                    untitled_n: None,
                 }],
                 active_tab: 0,
             }],
@@ -1517,6 +1683,9 @@ mod tests {
                     pinned: false,
                     unsaved_content: None,
                     mtime: None,
+                    custom_title: None,
+                    created_at: None,
+                    untitled_n: None,
                 }],
                 active_tab: 0,
             }],
@@ -1542,6 +1711,163 @@ mod tests {
         assert_eq!(tab.document.to_string(), "A\nB");
         assert!(tab.had_bom);
         assert_eq!(tab.line_ending, crate::textops::LineEnding::Crlf);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // --- WS-B: numeración, nombres automáticos, reordenar ---
+
+    fn titles(state: &EditorState, g: usize) -> Vec<String> {
+        state.groups[g].tabs.iter().map(|t| t.title.clone()).collect()
+    }
+
+    #[test]
+    fn ws_b_untitled_number_reuse_smallest_free_after_closing() {
+        let (sm, sesm, dir) = temp_manager("wsb-num");
+        let mut state = EditorState::new(sm, sesm);
+        for _ in 0..4 {
+            state.new_scratch_tab();
+        }
+        assert_eq!(titles(&state, 0), ["Sin título 1", "Sin título 2", "Sin título 3", "Sin título 4", "Sin título 5"]);
+        state.close_tab(0, 3); // 4
+        state.close_tab(0, 1); // 2
+        state.new_scratch_tab();
+        assert_eq!(state.groups[0].tabs.last().unwrap().title, "Sin título 2");
+        state.new_scratch_tab();
+        assert_eq!(state.groups[0].tabs.last().unwrap().title, "Sin título 4");
+        state.new_scratch_tab();
+        assert_eq!(state.groups[0].tabs.last().unwrap().title, "Sin título 6");
+        // otra ventana usa 7 y 8 => saltar
+        let extra: std::collections::HashSet<u32> = [7, 8].into_iter().collect();
+        assert_eq!(state.next_untitled_number(&extra), 9);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_b_numbers_free_when_draft_gets_auto_name_and_return() {
+        let (sm, sesm, dir) = temp_manager("wsb-auto");
+        let mut state = EditorState::new(sm, sesm);
+        state.new_scratch_tab();
+        let o = crate::scratch::NamingOpts::default();
+        state.groups[0].tabs[0].document = Rope::from_str("# Plan de viaje\ntexto");
+        assert!(state.recompute_titles(&o));
+        assert_eq!(titles(&state, 0), ["Plan de viaje", "Sin título 2"]);
+        // el 1 quedó libre para un borrador nuevo
+        state.new_scratch_tab();
+        assert_eq!(state.groups[0].tabs[2].title, "Sin título 1");
+        // vaciar el primero: recibe un número libre (no duplica)
+        state.groups[0].tabs[0].document = Rope::new();
+        state.recompute_titles(&o);
+        assert_eq!(titles(&state, 0), ["Sin título 3", "Sin título 2", "Sin título 1"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_b_restore_renumbers_legacy_titles_compactly() {
+        let (sm, sesm, dir) = temp_manager("wsb-restore");
+        let mut state = EditorState::new(sm, sesm);
+        let mk = |id: &str, title: &str| TabState {
+            document_id: id.to_string(),
+            path: None,
+            title: title.to_string(),
+            is_scratch: true,
+            cursor: 0,
+            scroll_line: 0,
+            pinned: false,
+            unsaved_content: None,
+            mtime: None,
+            custom_title: None,
+            created_at: None,
+            untitled_n: None,
+        };
+        let session = Session {
+            version: 1,
+            name: "t".into(),
+            created_at: 0,
+            groups: vec![
+                GroupState { id: 0, tabs: vec![mk("scratch-x-1", "Sin título 34"), mk("scratch-x-2", "Sin título 35")], active_tab: 0 },
+                GroupState { id: 1, tabs: vec![mk("scratch-x-3", "Sin título 7")], active_tab: 0 },
+            ],
+            active_group: 0,
+            group_count: 2,
+            workspace_root: None,
+        };
+        state.restore_from_session(&session);
+        assert_eq!(titles(&state, 0), ["Sin título 1", "Sin título 2"]);
+        assert_eq!(titles(&state, 1), ["Sin título 3"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_b_custom_title_and_proposed_name_with_date() {
+        let (sm, sesm, dir) = temp_manager("wsb-prop");
+        let mut state = EditorState::new(sm, sesm);
+        let mut o = crate::scratch::NamingOpts { auto_name: true, date_format: 1, date_position: 1, date_in_tab: false };
+        {
+            let t = &mut state.groups[0].tabs[0];
+            t.document = Rope::from_str("# Plan de viaje\n");
+            t.created_unix = 1_788_609_600;
+        }
+        state.recompute_titles(&o);
+        let t = &state.groups[0].tabs[0];
+        assert_eq!(t.title, "Plan de viaje"); // sin fecha en pestaña
+        let name = t.proposed_file_name(&o, "markdown");
+        // la fecha usa hora local: solo comprobamos forma
+        assert!(name.starts_with("Plan de viaje ") && name.ends_with(".md") && name.len() == "Plan de viaje ".len() + 10 + 3, "{name}");
+        o.date_in_tab = true;
+        o.date_position = 0;
+        state.recompute_titles(&o);
+        let t = &state.groups[0].tabs[0];
+        assert!(t.title.ends_with(" Plan de viaje") && t.title.len() == 10 + " Plan de viaje".len(), "{}", t.title);
+        assert!(t.proposed_file_name(&o, "json").ends_with(".json"));
+        // sin fecha => nombre limpio
+        o.date_format = 0;
+        assert_eq!(t.proposed_file_name(&o, "sql"), "Plan de viaje.sql");
+        // custom prevalece
+        state.groups[0].tabs[0].custom_title = Some("Mi nota".into());
+        state.recompute_titles(&o);
+        assert_eq!(state.groups[0].tabs[0].title, "Mi nota");
+        // auto desactivado: vuelve a numerado
+        state.groups[0].tabs[0].custom_title = None;
+        o.auto_name = false;
+        state.recompute_titles(&o);
+        assert_eq!(state.groups[0].tabs[0].title, "Sin título 1");
+        assert_eq!(state.groups[0].tabs[0].proposed_file_name(&o, "plaintext"), "Sin título 1.md");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_b_move_tab_keeps_active_and_content() {
+        let (sm, sesm, dir) = temp_manager("wsb-move");
+        let mut state = EditorState::new(sm, sesm);
+        for _ in 0..3 {
+            state.new_scratch_tab();
+        }
+        for (i, t) in state.groups[0].tabs.iter_mut().enumerate() {
+            t.document = Rope::from_str(&format!("doc{i}"));
+            t.cursor = i;
+        }
+        let docs = |s: &EditorState| -> Vec<String> { s.groups[0].tabs.iter().map(|t| t.document.to_string()).collect() };
+        state.groups[0].active = 2; // doc2
+        // mover 0 al final (hueco 4)
+        assert!(state.move_tab(0, 0, 4));
+        assert_eq!(docs(&state), ["doc1", "doc2", "doc3", "doc0"]);
+        assert_eq!(state.groups[0].active, 1);
+        assert_eq!(state.groups[0].tabs[1].document.to_string(), "doc2");
+        // mover la activa a la izquierda
+        assert!(state.move_tab(0, 1, 0));
+        assert_eq!(docs(&state), ["doc2", "doc1", "doc3", "doc0"]);
+        assert_eq!(state.groups[0].active, 0);
+        assert_eq!(state.groups[0].tabs[0].cursor, 2);
+        // no-ops
+        assert!(!state.move_tab(0, 1, 1));
+        assert!(!state.move_tab(0, 1, 2));
+        assert!(!state.move_tab(0, 9, 0));
+        assert!(!state.move_tab(0, 0, 5));
+        // activa a la derecha del origen y a la izquierda del destino
+        state.groups[0].active = 2; // doc3
+        assert!(state.move_tab(0, 3, 0)); // doc0 al inicio
+        assert_eq!(docs(&state), ["doc0", "doc2", "doc1", "doc3"]);
+        assert_eq!(state.groups[0].active, 3);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -13,6 +13,18 @@ component TabItem inherits Rectangle {
     in property <bool> dirty: false;
     in property <string> tooltip: "";
     in property <bool> is-active: false;
+    in property <bool> untitled: false;
+    // Reordenación por arrastre (WS-B): estado que mantiene TabBar.
+    in property <int> index: 0;
+    in property <int> tab-count: 0;
+    in property <bool> dragging: false;
+    in property <int> drag-from: -1;
+    in property <int> drop-index: -1;
+    in property <length> drag-x: 0px;
+    callback drag-begin();
+    callback drag-move(length);
+    callback drag-end();
+    callback drop-target(int);
     callback tab-clicked();
     callback close-clicked();
     callback middle-clicked();
@@ -54,22 +66,84 @@ component TabItem inherits Rectangle {
         }
     }
 
+    // Ancho explícito 90–200 px según el título; el título se recorta con "…" dentro del
+    // hueco (padding 10 + spacing 4 + botón 20 + padding 4) y nunca invade a la vecina.
+    title-measure := Text {
+        visible: false;
+        text: root.title;
+        font-size: Theme.font-size-normal;
+    }
     height: Theme.tab-height;
-    min-width: 90px;
-    max-width: 200px;
+    width: clamp(title-measure.preferred-width + 38px, 90px, 200px);
+    clip: true;
+    opacity: root.dragging && root.drag-from == root.index ? 0.55 : 1.0;
+
+    property <bool> hover-left: root.dragging && root.drag-x >= root.x && root.drag-x < root.x + root.width / 2;
+    property <bool> hover-right: root.dragging && root.drag-x >= root.x + root.width / 2 && root.drag-x < root.x + root.width;
+    changed hover-left => { if (root.hover-left) { root.drop-target(root.index); } }
+    changed hover-right => { if (root.hover-right) { root.drop-target(root.index + 1); } }
+    property <length> press-x: 0px;
+    property <bool> armed: false;
+    property <bool> was-dragged: false;
     background: root.is-active ? Theme.bg : (tab-ta.has-hover ? Theme.hover : Theme.sidebar-bg);
 
     // U17: el área clicable/tooltip cubre toda la pestaña (antes solo el texto), como en
     // VS Code — se declara primero para que quede debajo de los hijos visuales pero siga
     // recibiendo el evento en toda la superficie del TabItem.
     tab-ta := TouchArea {
-        clicked => { root.tab-clicked(); }
+        clicked => {
+            if (!root.was-dragged) {
+                root.tab-clicked();
+            }
+        }
         pointer-event(event) => {
             if event.button == PointerEventButton.middle && event.kind == PointerEventKind.up {
                 root.middle-clicked();
             }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.down {
+                root.press-x = self.mouse-x;
+                root.armed = true;
+                root.was-dragged = false;
+            }
+            if event.button == PointerEventButton.left && event.kind == PointerEventKind.up {
+                root.armed = false;
+                if (root.dragging && root.drag-from == root.index) {
+                    root.drag-end();
+                }
+            }
+            if event.kind == PointerEventKind.cancel {
+                root.armed = false;
+                if (root.dragging && root.drag-from == root.index) {
+                    root.drag-end();
+                }
+            }
         }
-        mouse-cursor: pointer;
+        moved => {
+            if (root.armed) {
+                if (!root.dragging && abs(self.mouse-x - root.press-x) > 6px) {
+                    root.was-dragged = true;
+                    root.drag-begin();
+                }
+                if (root.dragging && root.drag-from == root.index) {
+                    root.drag-move(root.x + self.mouse-x);
+                }
+            }
+        }
+        mouse-cursor: root.dragging && root.drag-from == root.index ? MouseCursor.grabbing : MouseCursor.pointer;
+    }
+
+    // Marcador de inserción durante el arrastre.
+    if root.dragging && root.drop-index == root.index && root.drag-from != root.index && root.drag-from + 1 != root.index: Rectangle {
+        x: 0px;
+        width: 3px;
+        height: 100%;
+        background: Theme.accent;
+    }
+    if root.dragging && root.tab-count > 0 && root.drop-index == root.tab-count && root.index == root.tab-count - 1 && root.drag-from != root.index: Rectangle {
+        x: parent.width - 3px;
+        width: 3px;
+        height: 100%;
+        background: Theme.accent;
     }
 
     if root.tooltip != "": Tooltip {
@@ -93,7 +167,10 @@ component TabItem inherits Rectangle {
             horizontal-stretch: 1;
 
             Text {
+                width: parent.width;
+                height: parent.height;
                 text: root.title;
+                font-italic: root.untitled;
                 font-size: Theme.font-size-normal;
                 color: root.is-active ? Theme.text-bright : (tab-ta.has-hover ? Theme.text : Theme.text-muted);
                 vertical-alignment: center;
@@ -190,6 +267,12 @@ export component TabBar inherits Rectangle {
     callback close-tab(int);
     callback new-tab();
     callback switch-group(int);
+    // Reordenar arrastrando (origen, hueco destino 0..=n en índices previos al movimiento).
+    callback reorder-tab(int, int);
+    property <bool> dragging: false;
+    property <int> drag-from: -1;
+    property <int> drop-index: -1;
+    property <length> drag-x: 0px;
 
     // U16: desplaza el `Flickable` de pestañas lo mínimo necesario para que la pestaña
     // en (x, w) quede totalmente visible (misma fórmula que el auto-scroll del cursor
@@ -241,6 +324,28 @@ export component TabBar inherits Rectangle {
                     dirty: tab.dirty;
                     tooltip: tab.tooltip;
                     is-active: root.active-tab == i;
+                    untitled: tab.untitled;
+                    index: i;
+                    tab-count: root.tabs.length;
+                    dragging: root.dragging;
+                    drag-from: root.drag-from;
+                    drop-index: root.drop-index;
+                    drag-x: root.drag-x;
+                    drag-begin => {
+                        root.dragging = true;
+                        root.drag-from = i;
+                        root.drop-index = i;
+                    }
+                    drag-move(x) => { root.drag-x = x; }
+                    drop-target(t) => { root.drop-index = t; }
+                    drag-end => {
+                        root.dragging = false;
+                        if (root.drop-index >= 0 && root.drop-index != root.drag-from) {
+                            root.reorder-tab(root.drag-from, root.drop-index);
+                        }
+                        root.drag-from = -1;
+                        root.drop-index = -1;
+                    }
                     tab-clicked => { root.tab-clicked(i); }
                     close-clicked => { root.close-tab(i); }
                     middle-clicked => { root.close-tab(i); }

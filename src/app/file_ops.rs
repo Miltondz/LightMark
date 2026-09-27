@@ -107,6 +107,22 @@ pub fn wire(ui: &App, state: &SharedState) {
     {
         let state = state.clone();
         let ui_weak = ui.as_weak();
+        ui.on_reorder_tab(move |from, to| {
+            if let Some(ui) = ui_weak.upgrade() {
+                let moved = {
+                    let mut st = state.borrow_mut();
+                    let g = st.editor.active_group;
+                    st.editor.move_tab(g, from.max(0) as usize, to.max(0) as usize)
+                };
+                if moved {
+                    super::refresh_tabs(&ui, &state);
+                }
+            }
+        });
+    }
+    {
+        let state = state.clone();
+        let ui_weak = ui.as_weak();
         ui.on_close_all(move || {
             if let Some(ui) = ui_weak.upgrade() {
                 close_all(&ui, &state);
@@ -286,24 +302,31 @@ pub fn save_tab(ui: &App, state: &SharedState, group: usize, index: usize) -> bo
 }
 
 pub fn save_as_tab(ui: &App, state: &SharedState, group: usize, index: usize) -> bool {
-    let default_name = {
-        let st = state.borrow();
-        let title = st
-            .editor
-            .groups
-            .get(group)
-            .and_then(|g| g.tabs.get(index))
-            .map(|t| t.title.clone())
-            .unwrap_or_else(|| "Sin título".to_string());
-        // No duplicar la extensión (hallazgo C.9: ".md.md") si el título ya trae una
-        // (p.ej. un archivo reabierto y guardado con otro nombre); solo añadir ".md" a
-        // los borradores sin extensión ("Sin título N").
-        if std::path::Path::new(&title).extension().is_some() {
-            title
-        } else {
-            format!("{}.md", title)
+    save_as_tab_with_name(ui, state, group, index, None)
+}
+
+/// Nombre propuesto en "Guardar como" (nombre propio/automático + fecha opcional + extensión
+/// según lenguaje); los archivos conservan su nombre.
+pub fn proposed_save_name(st: &super::AppState, group: usize, index: usize) -> String {
+    let opts = crate::scratch::NamingOpts::from_settings(&st.settings);
+    match st.editor.groups.get(group).and_then(|g| g.tabs.get(index)) {
+        Some(t) => {
+            let lang = if t.is_scratch() { st.editor.language_of(t) } else { String::new() };
+            t.proposed_file_name(&opts, &lang)
         }
-    };
+        None => "Sin título.md".to_string(),
+    }
+}
+
+/// `default_name`: nombre a proponer (D2/IA); `None` = propuesta automática.
+pub fn save_as_tab_with_name(
+    ui: &App,
+    state: &SharedState,
+    group: usize,
+    index: usize,
+    default_name: Option<String>,
+) -> bool {
+    let default_name = default_name.unwrap_or_else(|| proposed_save_name(&state.borrow(), group, index));
     let picker = text_filters(rfd::FileDialog::new().set_file_name(&default_name))
         .set_parent(&ui.window().window_handle());
     let Some(raw_path) = picker.save_file() else {
@@ -432,6 +455,20 @@ fn export_zip(ui: &App, state: &SharedState) {
             })
             .collect()
     };
+    // Nombres de entrada: nombre propio/automático (+ fecha opcional) + extensión, únicos.
+    let zip_names: Vec<String> = {
+        let st = state.borrow();
+        let opts = crate::scratch::NamingOpts::from_settings(&st.settings);
+        let names = st
+            .editor
+            .groups
+            .iter()
+            .flat_map(|g| g.tabs.iter())
+            .filter(|t| t.is_scratch() && !t.document.to_string().is_empty())
+            .map(|t| t.proposed_file_name(&opts, &st.editor.language_of(t)))
+            .collect();
+        crate::scratch::dedupe_file_names(names)
+    };
     if docs.is_empty() {
         set_status(ui, "No hay borradores con contenido para exportar");
         return;
@@ -447,7 +484,7 @@ fn export_zip(ui: &App, state: &SharedState) {
         return;
     };
     let count = docs.len();
-    match crate::scratch::export_to_zip(&docs, &path) {
+    match crate::scratch::export_to_zip_named(&docs, Some(&zip_names), &path) {
         Ok(_) => set_status(ui, &format!("Exportados {} borrador(es) a {}", count, path.display())),
         Err(e) => set_status(ui, &format!("Error al exportar: {}", e)),
     }

@@ -25,6 +25,14 @@ pub struct TabState {
     /// entonces y avisar en vez de sobrescribir en silencio.
     #[serde(default)]
     pub mtime: Option<u64>,
+    /// Nombre puesto por el usuario/IA (WS-B).
+    #[serde(default)]
+    pub custom_title: Option<String>,
+    /// Creación del borrador, segundos Unix (para la fecha en el nombre).
+    #[serde(default)]
+    pub created_at: Option<u64>,
+    #[serde(default)]
+    pub untitled_n: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -204,6 +212,9 @@ mod tests {
                 pinned: false,
                 unsaved_content: None,
                 mtime: None,
+                custom_title: None,
+                created_at: None,
+                untitled_n: None,
             }],
             active_tab: 0,
         });
