@@ -17,6 +17,7 @@ pub mod naming_ops;
 pub mod search_ops;
 pub mod settings_ops;
 pub mod view_ops;
+pub mod windows;
 
 use crate::editor::EditorState;
 use crate::settings::Settings;

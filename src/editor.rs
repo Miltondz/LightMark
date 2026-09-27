@@ -614,6 +614,10 @@ impl EditorState {
     }
 
     /// Recalcula nombre automático, números "Sin título N" y `title` de todos los borradores.
+    /// La versión multi-ventana de `used_untitled_numbers`/`next_untitled_number`: se llama
+    /// `used_untitled_numbers_except(windows, except_id)` fuera de la impl (función libre, ver
+    /// abajo) porque `Registry` (E1) guarda un `EditorState` por ventana y necesita combinar
+    /// los números en uso de TODAS salvo, opcionalmente, una (la que se está recalculando).
     /// Devuelve `true` si algún título cambió. Los ids de scratch en disco no se tocan.
     pub fn recompute_titles(&mut self, o: &crate::scratch::NamingOpts) -> bool {
         for g in self.groups.iter_mut() {
@@ -696,6 +700,39 @@ impl EditorState {
         let title = format!("Sin título {}", n);
         let id = self.scratch_manager.next_id_public();
         let tab = Tab::new_scratch(id, Rope::new(), title);
+        let g = self.active_group;
+        self.groups[g].tabs.push(tab);
+        let idx = self.groups[g].tabs.len() - 1;
+        self.groups[g].active = idx;
+        (g, idx)
+    }
+
+    /// Quita la pestaña `index` del grupo `group` y la devuelve, SIN borrar el archivo de
+    /// scratch en disco y SIN crear un borrador de reemplazo (a diferencia de `close_tab`).
+    /// Pensada para mover una pestaña a otra ventana (E1): el grupo puede quedar vacío tras
+    /// esto — decidir si se inserta un borrador nuevo o se cierra la ventana es responsabilidad
+    /// de quien llama (`windows.rs`), no de `EditorState`.
+    pub fn take_tab(&mut self, group: usize, index: usize) -> Option<Tab> {
+        let g = self.groups.get_mut(group)?;
+        if index >= g.tabs.len() {
+            return None;
+        }
+        let tab = g.tabs.remove(index);
+        if g.tabs.is_empty() {
+            g.active = 0;
+        } else {
+            if index < g.active {
+                g.active -= 1;
+            }
+            let len = g.tabs.len();
+            g.active = g.active.min(len - 1);
+        }
+        Some(tab)
+    }
+
+    /// Inserta `tab` (normalmente venida de `take_tab` en otra ventana) al final del grupo
+    /// activo y la activa. Devuelve `(grupo, índice)`.
+    pub fn insert_tab(&mut self, tab: Tab) -> (usize, usize) {
         let g = self.active_group;
         self.groups[g].tabs.push(tab);
         let idx = self.groups[g].tabs.len() - 1;
@@ -1071,6 +1108,24 @@ impl EditorState {
         }
         (saved_count, batch_result.err().map(|e| e.to_string()))
     }
+}
+
+/// Combina `used_untitled_numbers()` de varios `EditorState` (uno por ventana, E1), excluyendo
+/// opcionalmente uno de ellos por índice (típicamente la ventana que se está recalculando, que
+/// ya cuenta sus propios números por separado en `recompute_titles`). Función libre (no método
+/// de `Registry`) para que sea testeable sin crear ventanas Slint reales.
+pub fn used_untitled_numbers_except(
+    states: &[&EditorState],
+    except_index: Option<usize>,
+) -> std::collections::HashSet<u32> {
+    let mut out = std::collections::HashSet::new();
+    for (i, s) in states.iter().enumerate() {
+        if Some(i) == except_index {
+            continue;
+        }
+        out.extend(s.used_untitled_numbers());
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1868,6 +1923,93 @@ mod tests {
         assert!(state.move_tab(0, 3, 0)); // doc0 al inicio
         assert_eq!(docs(&state), ["doc0", "doc2", "doc1", "doc3"]);
         assert_eq!(state.groups[0].active, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_take_tab_then_insert_tab_preserves_scratch_and_leaves_file_untouched() {
+        // dos "ventanas" (dos EditorState) compartiendo el mismo directorio de scratch, como
+        // describe el plan E1 ("own ScratchManager instance, same dir").
+        let (sm_a, sesm_a, dir) = temp_manager("wse1-take-insert");
+        let scratch_base = sm_a.base_dir().to_path_buf();
+        let sm_b = ScratchManager::new(scratch_base.clone());
+        let sesm_b = SessionManager::new(dir.join("sessions"));
+        let mut win_a = EditorState::new(sm_a, sesm_a);
+        let mut win_b = EditorState::new(sm_b, sesm_b);
+
+        // Escribe contenido y fuerza el autoguardado a disco para poder comprobar después que
+        // moverla no lo toca.
+        win_a.groups[0].tabs[0].document = Rope::from_str("contenido movido");
+        let (saved, err) = win_a.save_changed_scratches();
+        assert_eq!(err, None);
+        assert_eq!(saved, 1);
+        let scratch_id = win_a.groups[0].tabs[0].scratch_id.clone().unwrap();
+        let file_path = scratch_base.join(format!("{}.md", scratch_id));
+        assert!(file_path.exists(), "el archivo de scratch debe existir tras autoguardar");
+        let bytes_before = std::fs::read(&file_path).unwrap();
+
+        // take_tab: se quita de la ventana A sin borrar el archivo ni el group queda con un
+        // borrador de reemplazo automático (eso lo decide quien llama, no EditorState).
+        let tab = win_a.take_tab(0, 0).expect("take_tab debe devolver la pestaña");
+        assert_eq!(tab.scratch_id, Some(scratch_id.clone()));
+        assert_eq!(tab.document.to_string(), "contenido movido");
+        assert!(win_a.groups[0].tabs.is_empty(), "el grupo de origen debe quedar vacío");
+        assert!(file_path.exists(), "take_tab no debe borrar el archivo de scratch en disco");
+        assert_eq!(std::fs::read(&file_path).unwrap(), bytes_before, "take_tab no debe tocar el archivo");
+
+        // insert_tab: llega a la ventana B, se activa, conserva scratch_id y contenido.
+        let (g, i) = win_b.insert_tab(tab);
+        assert_eq!((g, i), (0, 1)); // B ya tenía su propia "Sin título 1" en el índice 0
+        assert_eq!(win_b.groups[0].active, 1);
+        assert_eq!(win_b.groups[0].tabs[1].scratch_id, Some(scratch_id));
+        assert_eq!(win_b.groups[0].tabs[1].document.to_string(), "contenido movido");
+        assert!(file_path.exists(), "insert_tab no debe borrar ni recrear el archivo");
+        assert_eq!(std::fs::read(&file_path).unwrap(), bytes_before, "insert_tab no debe tocar el archivo");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_take_tab_out_of_range_returns_none() {
+        let (sm, sesm, dir) = temp_manager("wse1-take-oob");
+        let mut state = EditorState::new(sm, sesm);
+        assert!(state.take_tab(5, 0).is_none());
+        assert!(state.take_tab(0, 5).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_used_untitled_numbers_except_combines_other_windows_only() {
+        let (sm_a, sesm_a, dir) = temp_manager("wse1-numbers");
+        let sm_b = ScratchManager::new(dir.clone());
+        let sesm_b = SessionManager::new(dir.join("sessions"));
+        let sm_c = ScratchManager::new(dir.clone());
+        let sesm_c = SessionManager::new(dir.join("sessions"));
+
+        let mut win_a = EditorState::new(sm_a, sesm_a); // "Sin título 1"
+        win_a.new_scratch_tab(); // "Sin título 2"
+        let mut win_b = EditorState::new(sm_b, sesm_b); // otra "Sin título 1" (ventana distinta)
+        win_b.new_scratch_tab(); // "Sin título 2" también, en su propia ventana
+        let win_c = EditorState::new(sm_c, sesm_c); // "Sin título 1"
+
+        let states = [&win_a, &win_b, &win_c];
+        // Sin exclusión: 1 y 2 están en uso en A y B (C solo usa 1).
+        let all = used_untitled_numbers_except(&states, None);
+        assert_eq!(all, std::collections::HashSet::from([1, 2]));
+
+        // Excluyendo A: solo cuentan B y C -> sigue siendo {1, 2}.
+        let except_a = used_untitled_numbers_except(&states, Some(0));
+        assert_eq!(except_a, std::collections::HashSet::from([1, 2]));
+
+        // Excluyendo B y C simultáneamente no es posible con un solo índice, pero excluir C
+        // (que solo tiene 1) deja igual {1, 2} porque A y B ya cubren ambos.
+        let except_c = used_untitled_numbers_except(&states, Some(2));
+        assert_eq!(except_c, std::collections::HashSet::from([1, 2]));
+
+        // Con una sola ventana en la lista y excluida, el resultado es vacío.
+        let only_a = [&win_a];
+        assert_eq!(used_untitled_numbers_except(&only_a, Some(0)), std::collections::HashSet::new());
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

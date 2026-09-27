@@ -156,6 +156,100 @@ impl SessionManager {
     }
 }
 
+/// Estado de una ventana individual en la sesión v2 (E1 — multi-ventana). Sustituye a los
+/// campos "planos" de `Session` (que ahora describen una sola ventana implícita).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct WindowState {
+    pub x: i32,
+    pub y: i32,
+    pub width: f32,
+    pub height: f32,
+    pub maximized: bool,
+    pub groups: Vec<GroupState>,
+    pub active_group: usize,
+    pub workspace_root: Option<String>,
+}
+
+/// Formato de sesión v2: una lista de ventanas en vez de un único conjunto de grupos.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SessionV2 {
+    pub version: u32,
+    pub windows: Vec<WindowState>,
+    pub active_window: usize,
+}
+
+/// Geometría por defecto para la ventana única que resulta de migrar una sesión v1 (que no
+/// guardaba posición/tamaño de ventana).
+pub const DEFAULT_WINDOW_X: i32 = 100;
+pub const DEFAULT_WINDOW_Y: i32 = 100;
+pub const DEFAULT_WINDOW_WIDTH: f32 = 1024.0;
+pub const DEFAULT_WINDOW_HEIGHT: f32 = 768.0;
+
+impl SessionV2 {
+    /// Migra una `Session` v1 (grupos "sueltos") a v2 (una sola ventana con esos grupos).
+    pub fn from_v1(s: Session) -> Self {
+        SessionV2 {
+            version: 2,
+            windows: vec![WindowState {
+                x: DEFAULT_WINDOW_X,
+                y: DEFAULT_WINDOW_Y,
+                width: DEFAULT_WINDOW_WIDTH,
+                height: DEFAULT_WINDOW_HEIGHT,
+                maximized: false,
+                groups: s.groups,
+                active_group: s.active_group,
+                workspace_root: s.workspace_root,
+            }],
+            active_window: 0,
+        }
+    }
+}
+
+impl Default for SessionV2 {
+    fn default() -> Self {
+        SessionV2::from_v1(Session::default())
+    }
+}
+
+impl SessionManager {
+    /// Análogo a `save_session` pero para el formato v2 (multi-ventana).
+    pub fn save_session_v2(&self, session: &SessionV2, session_id: &str) -> std::io::Result<()> {
+        let path = self.session_path(session_id);
+        let data = serde_json::to_string_pretty(session)?;
+        crate::workspace::atomic_save(&path, &data)
+    }
+
+    /// Carga una sesión aceptando tanto v1 (grupos sueltos, migrados a una sola ventana) como
+    /// v2 (multi-ventana nativa). El `"version"` del JSON decide el camino; ausente == 1.
+    pub fn load_session_v2(&self, session_id: &str) -> std::io::Result<SessionV2> {
+        let path = self.session_path(session_id);
+        let data = std::fs::read_to_string(path)?;
+        let data = data.strip_prefix('\u{FEFF}').unwrap_or(&data);
+        let value: serde_json::Value = serde_json::from_str(data)?;
+        let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
+        if version >= 2 {
+            serde_json::from_value::<SessionV2>(value)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        } else {
+            let v1: Session = serde_json::from_value(value)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+            Ok(SessionV2::from_v1(v1))
+        }
+    }
+
+    pub fn save_auto_session_v2(&self, session: &SessionV2) -> std::io::Result<()> {
+        self.save_session_v2(session, "auto-restore")
+    }
+
+    pub fn load_auto_session_v2(&self) -> std::io::Result<Option<SessionV2>> {
+        match self.load_session_v2("auto-restore") {
+            Ok(session) => Ok(Some(session)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
+
 pub fn get_sessions_dir(app_data_dir: &Path) -> PathBuf {
     app_data_dir.join("sessions")
 }
@@ -293,6 +387,126 @@ mod tests {
         let manager = SessionManager::new(dir.clone());
         let err = manager.load_session("nope").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_v1_session_migrates_to_single_window_v2() {
+        let dir = temp_dir("v1-to-v2");
+        let manager = SessionManager::new(dir.clone());
+        let mut v1 = Session::default();
+        v1.workspace_root = Some("C:\\proyecto".to_string());
+        v1.groups.push(GroupState {
+            id: 0,
+            tabs: vec![TabState {
+                document_id: "scratch-1".to_string(),
+                path: None,
+                title: "Sin título 1".to_string(),
+                is_scratch: true,
+                cursor: 5,
+                scroll_line: 0,
+                pinned: false,
+                unsaved_content: None,
+                mtime: None,
+                custom_title: None,
+                created_at: None,
+                untitled_n: Some(1),
+            }],
+            active_tab: 0,
+        });
+        manager.save_session(&v1, "legacy-v1").unwrap();
+
+        let v2 = manager.load_session_v2("legacy-v1").unwrap();
+        assert_eq!(v2.version, 2);
+        assert_eq!(v2.windows.len(), 1, "v1 debe migrar a exactamente una ventana");
+        assert_eq!(v2.active_window, 0);
+        let win = &v2.windows[0];
+        assert_eq!(win.workspace_root, Some("C:\\proyecto".to_string()));
+        assert_eq!(win.groups.len(), 1);
+        assert_eq!(win.groups[0].tabs[0].cursor, 5);
+        assert_eq!(win.groups[0].tabs[0].untitled_n, Some(1));
+        // geometría por defecto para lo que v1 nunca guardó
+        assert_eq!(win.x, DEFAULT_WINDOW_X);
+        assert_eq!(win.y, DEFAULT_WINDOW_Y);
+        assert!(!win.maximized);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_v2_round_trip_is_identical() {
+        let dir = temp_dir("v2-roundtrip");
+        let manager = SessionManager::new(dir.clone());
+        let session = SessionV2 {
+            version: 2,
+            active_window: 1,
+            windows: vec![
+                WindowState {
+                    x: 10,
+                    y: 20,
+                    width: 800.0,
+                    height: 600.0,
+                    maximized: false,
+                    groups: vec![GroupState { id: 0, tabs: vec![], active_tab: 0 }],
+                    active_group: 0,
+                    workspace_root: None,
+                },
+                WindowState {
+                    x: 900,
+                    y: 20,
+                    width: 640.0,
+                    height: 480.0,
+                    maximized: true,
+                    groups: vec![GroupState {
+                        id: 0,
+                        tabs: vec![TabState {
+                            document_id: "tab-a".to_string(),
+                            path: Some("C:\\a.md".to_string()),
+                            title: "a.md".to_string(),
+                            is_scratch: false,
+                            cursor: 3,
+                            scroll_line: 2,
+                            pinned: true,
+                            unsaved_content: Some("hola".to_string()),
+                            mtime: Some(123),
+                            custom_title: Some("A".to_string()),
+                            created_at: Some(456),
+                            untitled_n: None,
+                        }],
+                        active_tab: 0,
+                    }],
+                    active_group: 0,
+                    workspace_root: Some("C:\\otro".to_string()),
+                },
+            ],
+        };
+        manager.save_session_v2(&session, "v2-test").unwrap();
+        let loaded = manager.load_session_v2("v2-test").unwrap();
+        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.active_window, 1);
+        assert_eq!(loaded.windows.len(), 2);
+        assert_eq!(loaded.windows[1].maximized, true);
+        assert_eq!(loaded.windows[1].groups[0].tabs[0].unsaved_content, Some("hola".to_string()));
+        assert_eq!(loaded.windows[1].workspace_root, Some("C:\\otro".to_string()));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_load_auto_session_v2_missing_returns_none() {
+        let dir = temp_dir("v2-auto-missing");
+        let manager = SessionManager::new(dir.clone());
+        assert!(manager.load_auto_session_v2().unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1_load_session_v2_strips_bom() {
+        let dir = temp_dir("v2-bom");
+        let manager = SessionManager::new(dir.clone());
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(serde_json::to_string(&SessionV2::default()).unwrap().as_bytes());
+        std::fs::write(dir.join("v2bom.json"), bytes).unwrap();
+        let loaded = manager.load_session_v2("v2bom").unwrap();
+        assert_eq!(loaded.version, 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

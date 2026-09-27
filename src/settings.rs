@@ -49,6 +49,9 @@ pub struct Settings {
     pub ai_name_candidates: u32,
     /// `true` una vez que el usuario aceptó el aviso de privacidad de la IA.
     pub ai_consent: bool,
+    /// E1 (multi-ventana): abrir archivos (argv, "Abrir", drag&drop, dedup) en una ventana
+    /// nueva en vez de reutilizar la ventana más reciente (`Registry::most_recent`).
+    pub open_files_in_new_window: bool,
 }
 
 /// Ids de proveedores de IA válidos (orden de `AI_PROVIDERS.md`); WS-D los alinea con
@@ -92,6 +95,7 @@ impl Default for Settings {
             ai_suggest_on_save_as: true,
             ai_name_candidates: 3,
             ai_consent: false,
+            open_files_in_new_window: false,
         }
     }
 }
