@@ -1,13 +1,66 @@
 import { Theme } from "../theme.slint";
 import { IconButton } from "icon_button.slint";
-import { ToolbarSeparator } from "separator.slint";
 import { SegmentedControl } from "segmented_control.slint";
 
-// Barra de herramientas principal (extraída de app.slint tal cual en la wave 0; WS-C la
-// reorganiza: grupos, iconos nuevos, desbordamiento a "⋯"). Las propiedades `in` son
-// espejo de las de `App`; las acciones salen por callbacks reenviados por `App`.
+// Separador entre grupos: 1px de línea con 4px de aire a cada lado (el layout ya suma 2px).
+component GroupSep inherits Rectangle {
+    width: 9px;
+    height: 18px;
+    Rectangle { x: 4px; width: 1px; height: parent.height; background: Theme.border; }
+}
+
+// Fila del menú de desbordamiento "⋯": icono + texto + atajo.
+component OverflowRow inherits Rectangle {
+    in property <image> icon;
+    in property <string> label;
+    in property <string> shortcut: "";
+    in property <bool> enabled: true;
+    in property <bool> active: false;
+    callback activated();
+
+    height: 28px;
+    background: !root.enabled ? transparent : (ta.has-hover ? Theme.hover-strong : (root.active ? Theme.accent-pressed : transparent));
+
+    Image {
+        x: 8px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        source: root.icon;
+        colorize: Theme.icon-color;
+        opacity: root.enabled ? 1.0 : 0.4;
+    }
+    Text {
+        x: 32px;
+        width: parent.width - 32px - 10px;
+        height: parent.height;
+        text: root.label;
+        overflow: elide;
+        vertical-alignment: center;
+        font-size: Theme.font-size-normal;
+        color: root.enabled ? Theme.text : Theme.text-disabled;
+    }
+    Text {
+        x: parent.width - self.width - 10px;
+        width: self.preferred-width;
+        height: parent.height;
+        text: root.shortcut;
+        vertical-alignment: center;
+        font-size: Theme.font-size-small;
+        color: Theme.text-muted;
+        opacity: root.enabled ? 1.0 : 0.5;
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.activated(); }
+    }
+}
+
+// Barra de herramientas principal. Grupos (de izquierda a derecha):
+//   Archivo | Edición | Buscar/Ir/Formatear | Líneas y código | Vista | Visualización | IA | … Configuración
+// Con poco ancho se ocultan por prioridad (ver `level`) y sus acciones pasan al popup "⋯".
 export component Toolbar inherits Rectangle {
-    // Estado que ya usa la barra
     in property <bool> can-save: false;
     in property <bool> can-save-all: false;
     in property <bool> can-undo: false;
@@ -19,14 +72,20 @@ export component Toolbar inherits Rectangle {
     in property <int> view-mode: 0;
     in-out property <bool> show-explorer: false;
     in-out property <bool> word-wrap: false;
-    // Declaradas en la wave 0 para WS-C / WS-D (aún sin usar)
     in property <bool> show-line-numbers: true;
     in property <int> theme: 0;
     in property <int> font-size: 14;
     in property <string> comment-marker: "//";
+    // false para lenguajes sin comentarios (JSON, texto plano)
+    in property <bool> comment-supported: true;
+    in property <string> language-name: "";
     in property <bool> can-ai: false;
     in property <bool> ai-busy: false;
     in property <string> ai-status: "";
+    // Ancho disponible pasado por `App` (su propio `width`, NO el `width` de este
+    // componente): usar `root.width` aquí crearía un ciclo de layout (el contenido
+    // visible depende de `level`, que dependería de `width`, que depende del contenido).
+    in property <length> avail-width: 1200px;
 
     callback new-tab();
     callback open-file();
@@ -36,18 +95,40 @@ export component Toolbar inherits Rectangle {
     callback redo();
     // Alterna el panel de búsqueda y enfoca buscador/editor (lo resuelve App).
     callback search-clicked();
+    callback replace-clicked();
+    callback goto-line-clicked();
     callback format-document();
     callback set-view-mode(int);
     callback open-browser();
     callback open-settings();
     callback settings-changed();
-    // wave-1 fills (WS-C / WS-D)
     callback toggle-theme();
     callback toggle-line-numbers();
     callback zoom-in();
     callback zoom-out();
+    callback toggle-comment();
+    callback duplicate-line();
+    callback delete-line();
+    callback move-line-up();
+    callback move-line-down();
+    callback indent-line();
+    callback unindent-line();
+    callback join-lines();
     callback ai-suggest-name();
     callback ai-open-settings();
+
+    // 3 = todo visible; 2 = sin "Líneas y código"; 1 = además sin "Visualización";
+    // 0 = además sin Reemplazar/Ir a línea/Formatear/IA.
+    property <int> level: root.avail-width >= 1080px ? 3 : root.avail-width >= 900px ? 2 : root.avail-width >= 760px ? 1 : 0;
+    // El editor solo recibe operaciones de línea si es visible (no en "solo vista previa").
+    property <bool> editing: root.view-mode != 2;
+    property <bool> comment-enabled: root.editing && root.comment-supported;
+    property <string> comment-tip: !root.comment-supported
+        ? "Comentar / descomentar: " + root.language-name + " no admite comentarios"
+        : "Comentar / descomentar (Ctrl+/) — " + root.comment-marker;
+    property <string> theme-tip: root.theme == 0 ? "Cambiar a tema Océano" : "Cambiar a tema Oscuro";
+    property <string> ai-tip: root.ai-busy ? (root.ai-status != "" ? root.ai-status : "IA trabajando…")
+        : (root.can-ai ? "Sugerir nombre con IA" : "Sugerir nombre con IA (actívala y configúrala en IA › Configurar)");
 
     height: Theme.toolbar-height;
     background: Theme.sidebar-bg;
@@ -57,39 +138,113 @@ export component Toolbar inherits Rectangle {
     HorizontalLayout {
         padding-left: 6px;
         padding-right: 6px;
-        spacing: 4px;
+        spacing: 2px;
 
+        // ── Archivo ──
         IconButton { icon: @image-url("../icons/file-plus.svg"); tooltip-text: "Nuevo (Ctrl+N)"; clicked => { root.new-tab(); } }
         IconButton { icon: @image-url("../icons/folder-open.svg"); tooltip-text: "Abrir (Ctrl+O)"; clicked => { root.open-file(); } }
         IconButton { icon: @image-url("../icons/save.svg"); tooltip-text: "Guardar (Ctrl+S)"; enabled: root.can-save; clicked => { root.save(); } }
         IconButton { icon: @image-url("../icons/save-all.svg"); tooltip-text: "Guardar todo (Ctrl+Alt+S)"; enabled: root.can-save-all; clicked => { root.save-all(); } }
-        ToolbarSeparator {}
+        GroupSep {}
 
+        // ── Edición ──
         IconButton { icon: @image-url("../icons/undo.svg"); tooltip-text: "Deshacer (Ctrl+Z)"; enabled: root.can-undo; clicked => { root.undo(); } }
         IconButton { icon: @image-url("../icons/redo.svg"); tooltip-text: "Rehacer (Ctrl+Y)"; enabled: root.can-redo; clicked => { root.redo(); } }
-        ToolbarSeparator {}
+        GroupSep {}
 
+        // ── Buscar / Ir a línea / Formatear ──
         IconButton { icon: @image-url("../icons/search.svg"); tooltip-text: "Buscar (Ctrl+F)"; active: root.show-search; clicked => { root.search-clicked(); } }
-        IconButton { icon: @image-url("../icons/wand.svg"); tooltip-text: "Formatear documento (Ctrl+Shift+F)"; enabled: root.can-format; clicked => { root.format-document(); } }
-        ToolbarSeparator {}
+        if root.level >= 1: IconButton { icon: @image-url("../icons/replace.svg"); tooltip-text: "Reemplazar (Ctrl+H)"; clicked => { root.replace-clicked(); } }
+        if root.level >= 1: IconButton { icon: @image-url("../icons/hash.svg"); tooltip-text: "Ir a línea (Ctrl+G)"; clicked => { root.goto-line-clicked(); } }
+        if root.level >= 1: IconButton { icon: @image-url("../icons/wand.svg"); tooltip-text: root.can-format ? "Formatear documento (Ctrl+Shift+F)" : "Formatear documento (no disponible para este lenguaje)"; enabled: root.can-format; clicked => { root.format-document(); } }
+        GroupSep {}
 
+        // ── Líneas y código ──
+        if root.level >= 3: IconButton { icon: @image-url("../icons/message-square-code.svg"); tooltip-text: root.comment-tip; enabled: root.comment-enabled; clicked => { root.toggle-comment(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/copy-plus.svg"); tooltip-text: "Duplicar línea (Ctrl+Shift+D)"; enabled: root.editing; clicked => { root.duplicate-line(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/trash-2.svg"); tooltip-text: "Eliminar línea (Ctrl+Shift+K)"; enabled: root.editing; clicked => { root.delete-line(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/arrow-up.svg"); tooltip-text: "Mover línea arriba (Alt+↑)"; enabled: root.editing; clicked => { root.move-line-up(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/arrow-down.svg"); tooltip-text: "Mover línea abajo (Alt+↓)"; enabled: root.editing; clicked => { root.move-line-down(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/indent-increase.svg"); tooltip-text: "Indentar (Tab)"; enabled: root.editing; clicked => { root.indent-line(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/indent-decrease.svg"); tooltip-text: "Desindentar (Shift+Tab)"; enabled: root.editing; clicked => { root.unindent-line(); } }
+        if root.level >= 3: IconButton { icon: @image-url("../icons/fold-vertical.svg"); tooltip-text: "Unir líneas (Ctrl+J)"; enabled: root.editing; clicked => { root.join-lines(); } }
+        if root.level >= 3: GroupSep {}
+
+        // ── Vista ──
         SegmentedControl {
             segments: [
                 { icon: @image-url("../icons/panel-editor.svg"), tooltip: "Solo editor", enabled: true },
-                { icon: @image-url("../icons/columns.svg"), tooltip: root.preview-available ? "Dividido" : "Dividido (no disponible para este lenguaje)", enabled: root.preview-available },
+                { icon: @image-url("../icons/columns.svg"), tooltip: root.preview-available ? "Dividido (Ctrl+M)" : "Dividido (no disponible para este lenguaje)", enabled: root.preview-available },
                 { icon: @image-url("../icons/eye.svg"), tooltip: root.preview-available ? "Solo vista previa" : "Solo vista previa (no disponible para este lenguaje)", enabled: root.preview-available },
             ];
             selected: root.view-mode;
             selected-changed(i) => { root.set-view-mode(i); }
         }
-        IconButton { icon: @image-url("../icons/globe.svg"); tooltip-text: "Abrir en navegador"; enabled: root.preview-available; clicked => { root.open-browser(); } }
-        ToolbarSeparator {}
+        IconButton { icon: @image-url("../icons/globe.svg"); tooltip-text: root.preview-available ? "Abrir vista previa en el navegador" : "Abrir en el navegador (no disponible para este lenguaje)"; enabled: root.preview-available; clicked => { root.open-browser(); } }
+        GroupSep {}
 
-        IconButton { icon: @image-url("../icons/sidebar.svg"); tooltip-text: "Explorador (Ctrl+B)"; active: root.show-explorer; clicked => { root.show-explorer = !root.show-explorer; root.settings-changed(); } }
-        IconButton { icon: @image-url("../icons/wrap-text.svg"); tooltip-text: "Ajuste de línea (Alt+Z)"; active: root.word-wrap; clicked => { root.word-wrap = !root.word-wrap; root.settings-changed(); } }
+        // ── Visualización ──
+        if root.level >= 2: IconButton { icon: @image-url("../icons/sidebar.svg"); tooltip-text: "Explorador (Ctrl+B)"; active: root.show-explorer; clicked => { root.show-explorer = !root.show-explorer; root.settings-changed(); } }
+        if root.level >= 2: IconButton { icon: @image-url("../icons/wrap-text.svg"); tooltip-text: "Ajuste de línea (Alt+Z)"; active: root.word-wrap; clicked => { root.word-wrap = !root.word-wrap; root.settings-changed(); } }
+        if root.level >= 2: IconButton { icon: @image-url("../icons/list-ordered.svg"); tooltip-text: "Números de línea"; active: root.show-line-numbers; clicked => { root.toggle-line-numbers(); } }
+        if root.level >= 2: IconButton { icon: @image-url("../icons/a-arrow-down.svg"); tooltip-text: "Reducir fuente (Ctrl+-) · " + root.font-size + " px"; enabled: root.font-size > 8; clicked => { root.zoom-out(); } }
+        if root.level >= 2: IconButton { icon: @image-url("../icons/a-arrow-up.svg"); tooltip-text: "Aumentar fuente (Ctrl++) · " + root.font-size + " px"; enabled: root.font-size < 40; clicked => { root.zoom-in(); } }
+        if root.level >= 2: IconButton { icon: root.theme == 0 ? @image-url("../icons/sun.svg") : @image-url("../icons/moon.svg"); tooltip-text: root.theme-tip; clicked => { root.toggle-theme(); } }
+        if root.level >= 2: GroupSep {}
+
+        // ── IA ──
+        if root.level >= 1: IconButton { icon: @image-url("../icons/sparkles.svg"); tooltip-text: root.ai-tip; enabled: root.can-ai && !root.ai-busy; clicked => { root.ai-suggest-name(); } }
+
+        // ── Desbordamiento ──
+        if root.level < 3: IconButton {
+            icon: @image-url("../icons/ellipsis.svg");
+            tooltip-text: "Más acciones";
+            clicked => { overflow-popup.show(); }
+        }
 
         Rectangle { horizontal-stretch: 1; }
 
         IconButton { icon: @image-url("../icons/settings.svg"); tooltip-text: "Configuración (Ctrl+,)"; active: root.show-settings; clicked => { root.open-settings(); } }
+    }
+
+    overflow-popup := PopupWindow {
+        x: root.width - self.width - 8px;
+        y: root.height - 1px;
+        width: 270px;
+        height: menu-rect.preferred-height;
+        close-policy: PopupClosePolicy.close-on-click-outside;
+
+        menu-rect := Rectangle {
+            background: Theme.dialog-bg;
+            border-width: 1px;
+            border-color: Theme.border-light;
+            border-radius: Theme.radius-normal;
+
+            VerticalLayout {
+                padding: 4px;
+                spacing: 0px;
+
+                if root.level < 1: OverflowRow { icon: @image-url("../icons/replace.svg"); label: "Reemplazar"; shortcut: "Ctrl+H"; activated => { overflow-popup.close(); root.replace-clicked(); } }
+                if root.level < 1: OverflowRow { icon: @image-url("../icons/hash.svg"); label: "Ir a línea"; shortcut: "Ctrl+G"; activated => { overflow-popup.close(); root.goto-line-clicked(); } }
+                if root.level < 1: OverflowRow { icon: @image-url("../icons/wand.svg"); label: "Formatear documento"; shortcut: "Ctrl+Shift+F"; enabled: root.can-format; activated => { overflow-popup.close(); root.format-document(); } }
+                if root.level < 1: OverflowRow { icon: @image-url("../icons/sparkles.svg"); label: "Sugerir nombre con IA"; enabled: root.can-ai && !root.ai-busy; activated => { overflow-popup.close(); root.ai-suggest-name(); } }
+
+                if root.level < 2: OverflowRow { icon: @image-url("../icons/sidebar.svg"); label: "Explorador"; shortcut: "Ctrl+B"; active: root.show-explorer; activated => { overflow-popup.close(); root.show-explorer = !root.show-explorer; root.settings-changed(); } }
+                if root.level < 2: OverflowRow { icon: @image-url("../icons/wrap-text.svg"); label: "Ajuste de línea"; shortcut: "Alt+Z"; active: root.word-wrap; activated => { overflow-popup.close(); root.word-wrap = !root.word-wrap; root.settings-changed(); } }
+                if root.level < 2: OverflowRow { icon: @image-url("../icons/list-ordered.svg"); label: "Números de línea"; active: root.show-line-numbers; activated => { overflow-popup.close(); root.toggle-line-numbers(); } }
+                if root.level < 2: OverflowRow { icon: @image-url("../icons/a-arrow-down.svg"); label: "Reducir fuente (" + root.font-size + " px)"; shortcut: "Ctrl+-"; enabled: root.font-size > 8; activated => { overflow-popup.close(); root.zoom-out(); } }
+                if root.level < 2: OverflowRow { icon: @image-url("../icons/a-arrow-up.svg"); label: "Aumentar fuente (" + root.font-size + " px)"; shortcut: "Ctrl++"; enabled: root.font-size < 40; activated => { overflow-popup.close(); root.zoom-in(); } }
+                if root.level < 2: OverflowRow { icon: root.theme == 0 ? @image-url("../icons/sun.svg") : @image-url("../icons/moon.svg"); label: root.theme-tip; activated => { overflow-popup.close(); root.toggle-theme(); } }
+
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/message-square-code.svg"); label: root.comment-supported ? "Comentar / descomentar (" + root.comment-marker + ")" : "Comentar (no admitido en " + root.language-name + ")"; shortcut: "Ctrl+/"; enabled: root.comment-enabled; activated => { overflow-popup.close(); root.toggle-comment(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/copy-plus.svg"); label: "Duplicar línea"; shortcut: "Ctrl+Shift+D"; enabled: root.editing; activated => { overflow-popup.close(); root.duplicate-line(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/trash-2.svg"); label: "Eliminar línea"; shortcut: "Ctrl+Shift+K"; enabled: root.editing; activated => { overflow-popup.close(); root.delete-line(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/arrow-up.svg"); label: "Mover línea arriba"; shortcut: "Alt+↑"; enabled: root.editing; activated => { overflow-popup.close(); root.move-line-up(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/arrow-down.svg"); label: "Mover línea abajo"; shortcut: "Alt+↓"; enabled: root.editing; activated => { overflow-popup.close(); root.move-line-down(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/indent-increase.svg"); label: "Indentar"; shortcut: "Tab"; enabled: root.editing; activated => { overflow-popup.close(); root.indent-line(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/indent-decrease.svg"); label: "Desindentar"; shortcut: "Shift+Tab"; enabled: root.editing; activated => { overflow-popup.close(); root.unindent-line(); } }
+                if root.level < 3: OverflowRow { icon: @image-url("../icons/fold-vertical.svg"); label: "Unir líneas"; shortcut: "Ctrl+J"; enabled: root.editing; activated => { overflow-popup.close(); root.join-lines(); } }
+            }
+        }
     }
 }

@@ -303,9 +303,9 @@ export component App inherits Window {
     MenuBar {
         Menu {
             title: "Archivo";
-            MenuItem { title: "Nuevo"; shortcut: @keys(Control + N); enabled: !root.modal-open; activated => { root.new-tab(); } }
-            MenuItem { title: "Abrir…"; shortcut: @keys(Control + O); enabled: !root.modal-open; activated => { root.open-file(); } }
-            MenuItem { title: "Abrir carpeta…"; shortcut: @keys(Control + Shift + O); enabled: !root.modal-open; activated => { root.open-folder(); } }
+            MenuItem { title: "Nuevo"; icon: @image-url("icons/menu/file-plus.svg"); shortcut: @keys(Control + N); enabled: !root.modal-open; activated => { root.new-tab(); } }
+            MenuItem { title: "Abrir…"; icon: @image-url("icons/menu/folder-open.svg"); shortcut: @keys(Control + O); enabled: !root.modal-open; activated => { root.open-file(); } }
+            MenuItem { title: "Abrir carpeta…"; icon: @image-url("icons/menu/folder.svg"); shortcut: @keys(Control + Shift + O); enabled: !root.modal-open; activated => { root.open-folder(); } }
             Menu {
                 title: "Recientes";
                 enabled: root.recent_files.length > 0 && !root.modal-open;
@@ -315,16 +315,16 @@ export component App inherits Window {
                 }
             }
             MenuSeparator {}
-            MenuItem { title: "Guardar"; shortcut: @keys(Control + S); enabled: root.can_save && !root.modal-open; activated => { root.save(); } }
+            MenuItem { title: "Guardar"; icon: @image-url("icons/menu/save.svg"); shortcut: @keys(Control + S); enabled: root.can_save && !root.modal-open; activated => { root.save(); } }
             MenuItem { title: "Guardar como…"; shortcut: @keys(Control + Shift + S); enabled: !root.modal-open; activated => { root.save-as(); } }
-            MenuItem { title: "Guardar todo"; shortcut: @keys(Control + Alt + S); enabled: root.can_save_all && !root.modal-open; activated => { root.save-all(); } }
+            MenuItem { title: "Guardar todo"; icon: @image-url("icons/menu/save-all.svg"); shortcut: @keys(Control + Alt + S); enabled: root.can_save_all && !root.modal-open; activated => { root.save-all(); } }
             MenuSeparator {}
-            MenuItem { title: "Exportar borradores a ZIP…"; enabled: !root.modal-open; activated => { root.export-zip(); } }
+            MenuItem { title: "Exportar borradores a ZIP…"; icon: @image-url("icons/menu/archive.svg"); enabled: !root.modal-open; activated => { root.export-zip(); } }
             MenuSeparator {}
-            MenuItem { title: "Cerrar pestaña"; shortcut: @keys(Control + W); enabled: !root.modal-open; activated => { root.close-tab(root.active_tab); } }
+            MenuItem { title: "Cerrar pestaña"; icon: @image-url("icons/menu/x-square.svg"); shortcut: @keys(Control + W); enabled: !root.modal-open; activated => { root.close-tab(root.active_tab); } }
             MenuItem { title: "Cerrar todas"; enabled: !root.modal-open; activated => { root.close-all(); } }
             MenuSeparator {}
-            MenuItem { title: "Configuración…"; shortcut: @keys(Control + Shift? + ","); enabled: !root.show_shortcuts && !root.show_about && !root.show_goto_line; activated => { root.show_settings = true; } }
+            MenuItem { title: "Configuración…"; icon: @image-url("icons/menu/settings.svg"); shortcut: @keys(Control + Shift? + ","); enabled: !root.show_shortcuts && !root.show_about && !root.show_goto_line; activated => { root.show_settings = true; } }
             MenuSeparator {}
             MenuItem { title: "Salir"; activated => { root.exit-app(); } }
         }
@@ -334,8 +334,8 @@ export component App inherits Window {
             // Deshacer/Rehacer: sin `shortcut` en el menú (U2) — Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z
             // se manejan en CodeEditor.key-pressed → undo-requested/redo-requested más abajo,
             // para que nunca compitan con el deshacer nativo del TextInput enfocado.
-            MenuItem { title: "Deshacer"; enabled: root.can_undo && !root.modal-open; activated => { root.undo(); } }
-            MenuItem { title: "Rehacer"; enabled: root.can_redo && !root.modal-open; activated => { root.redo(); } }
+            MenuItem { title: "Deshacer"; icon: @image-url("icons/menu/undo.svg"); enabled: root.can_undo && !root.modal-open; activated => { root.undo(); } }
+            MenuItem { title: "Rehacer"; icon: @image-url("icons/menu/redo.svg"); enabled: root.can_redo && !root.modal-open; activated => { root.redo(); } }
             MenuSeparator {}
             // Cortar/Copiar/Pegar/Seleccionar todo: sin `shortcut` (U2/E2) — el TextInput
             // nativo enfocado ya maneja Ctrl+X/C/V/A; el menú solo ofrece el acceso por clic.
@@ -351,25 +351,25 @@ export component App inherits Window {
             // herramientas (root.toggle-search-panel(), que recalcula resultados) en vez
             // de solo poner `show_search = true` a mano; si el panel ya está abierto no se
             // vuelve a togglear (no lo cierran), solo se enfoca/expande.
-            MenuItem { title: "Buscar"; shortcut: @keys(Control + F); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } search-panel.focus-search(); } }
-            MenuItem { title: "Reemplazar"; shortcut: @keys(Control + H); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } root.search_replace_expanded = true; search-panel.focus-search(); } }
+            MenuItem { title: "Buscar"; icon: @image-url("icons/menu/search.svg"); shortcut: @keys(Control + F); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } search-panel.focus-search(); } }
+            MenuItem { title: "Reemplazar"; icon: @image-url("icons/menu/replace.svg"); shortcut: @keys(Control + H); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } root.search_replace_expanded = true; search-panel.focus-search(); } }
             MenuItem { title: "Buscar siguiente"; shortcut: @keys(F3); enabled: !root.modal-open; activated => { root.find-next(); } }
             MenuItem { title: "Buscar anterior"; shortcut: @keys(Shift + F3); enabled: !root.modal-open; activated => { root.find-prev(); } }
             MenuSeparator {}
-            MenuItem { title: "Formatear documento"; shortcut: @keys(Control + Shift + F); enabled: root.can_format && !root.modal-open; activated => { root.format-document(); } }
+            MenuItem { title: "Formatear documento"; icon: @image-url("icons/menu/wand.svg"); shortcut: @keys(Control + Shift + F); enabled: root.can_format && !root.modal-open; activated => { root.format-document(); } }
         }
 
         Menu {
             title: "Selección";
-            MenuItem { title: "Duplicar línea"; shortcut: @keys(Control + Shift + D); enabled: !root.modal-open; activated => { root.duplicate-line(); } }
-            MenuItem { title: "Eliminar línea"; shortcut: @keys(Control + Shift + K); enabled: !root.modal-open; activated => { root.delete-line(); } }
-            MenuItem { title: "Mover línea arriba"; shortcut: @keys(Alt + UpArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-up(); } }
-            MenuItem { title: "Mover línea abajo"; shortcut: @keys(Alt + DownArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-down(); } }
+            MenuItem { title: "Duplicar línea"; icon: @image-url("icons/menu/copy-plus.svg"); shortcut: @keys(Control + Shift + D); enabled: !root.modal-open; activated => { root.duplicate-line(); } }
+            MenuItem { title: "Eliminar línea"; icon: @image-url("icons/menu/trash-2.svg"); shortcut: @keys(Control + Shift + K); enabled: !root.modal-open; activated => { root.delete-line(); } }
+            MenuItem { title: "Mover línea arriba"; icon: @image-url("icons/menu/arrow-up.svg"); shortcut: @keys(Alt + UpArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-up(); } }
+            MenuItem { title: "Mover línea abajo"; icon: @image-url("icons/menu/arrow-down.svg"); shortcut: @keys(Alt + DownArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-down(); } }
             MenuSeparator {}
-            MenuItem { title: "Comentar / descomentar"; shortcut: @keys(Control + Shift? + "/"); enabled: !root.modal-open; activated => { root.toggle-comment(); } }
-            MenuItem { title: "Indentar"; enabled: !root.modal-open; activated => { root.indent-line(); } }
-            MenuItem { title: "Desindentar"; enabled: !root.modal-open; activated => { root.unindent-line(); } }
-            MenuItem { title: "Unir líneas"; shortcut: @keys(Control + J); enabled: !root.modal-open; activated => { root.join-lines(); } }
+            MenuItem { title: "Comentar / descomentar (" + root.comment_marker + ")"; icon: @image-url("icons/menu/message-square-code.svg"); shortcut: @keys(Control + Shift? + "/"); enabled: !root.modal-open; activated => { root.toggle-comment(); } }
+            MenuItem { title: "Indentar"; icon: @image-url("icons/menu/indent-increase.svg"); enabled: !root.modal-open; activated => { root.indent-line(); } }
+            MenuItem { title: "Desindentar"; icon: @image-url("icons/menu/indent-decrease.svg"); enabled: !root.modal-open; activated => { root.unindent-line(); } }
+            MenuItem { title: "Unir líneas"; icon: @image-url("icons/menu/fold-vertical.svg"); shortcut: @keys(Control + J); enabled: !root.modal-open; activated => { root.join-lines(); } }
         }
 
         Menu {
@@ -379,9 +379,9 @@ export component App inherits Window {
             // propiedad enlazada; `activated` solo dispara el efecto lateral (persistir).
             MenuItem { title: "Barra de herramientas"; enabled: !root.modal-open; checkable: true; checked <=> root.show_toolbar; activated => { root.settings-changed(); } }
             MenuItem { title: "Barra de estado"; enabled: !root.modal-open; checkable: true; checked <=> root.show_status_bar; activated => { root.settings-changed(); } }
-            MenuItem { title: "Explorador"; shortcut: @keys(Control + B); enabled: !root.modal-open; checkable: true; checked <=> root.show_explorer; activated => { root.settings-changed(); } }
-            MenuItem { title: "Ajuste de línea"; shortcut: @keys(Alt + Z); enabled: !root.modal-open; checkable: true; checked <=> root.word_wrap; activated => { root.settings-changed(); } }
-            MenuItem { title: "Números de línea"; enabled: !root.modal-open && !root.word_wrap; checkable: true; checked <=> root.show_line_numbers; activated => { root.settings-changed(); } }
+            MenuItem { title: "Explorador"; icon: @image-url("icons/menu/sidebar.svg"); shortcut: @keys(Control + B); enabled: !root.modal-open; checkable: true; checked <=> root.show_explorer; activated => { root.settings-changed(); } }
+            MenuItem { title: "Ajuste de línea"; icon: @image-url("icons/menu/wrap-text.svg"); shortcut: @keys(Alt + Z); enabled: !root.modal-open; checkable: true; checked <=> root.word_wrap; activated => { root.settings-changed(); } }
+            MenuItem { title: "Números de línea"; icon: @image-url("icons/menu/list-ordered.svg"); enabled: !root.modal-open; checkable: true; checked <=> root.show_line_numbers; activated => { root.settings-changed(); } }
             MenuSeparator {}
             // Radio (view_mode): binding one-way in-place (ver nota de limitación arriba).
             MenuItem { title: "Solo editor"; enabled: !root.modal-open; checkable: true; checked: root.view_mode == 0; activated => { root.set-view-mode(0); } }
@@ -393,20 +393,21 @@ export component App inherits Window {
             MenuSeparator {}
             Menu {
                 title: "Tema";
-                MenuItem { title: "Oscuro"; enabled: !root.modal-open; checkable: true; checked: root.theme == 0; activated => { root.theme = 0; root.settings-changed(); } }
-                MenuItem { title: "Océano"; enabled: !root.modal-open; checkable: true; checked: root.theme == 1; activated => { root.theme = 1; root.settings-changed(); } }
+                MenuItem { title: "Oscuro"; icon: @image-url("icons/menu/moon.svg"); enabled: !root.modal-open; checkable: true; checked: root.theme == 0; activated => { root.theme = 0; root.settings-changed(); } }
+                MenuItem { title: "Océano"; icon: @image-url("icons/menu/sun.svg"); enabled: !root.modal-open; checkable: true; checked: root.theme == 1; activated => { root.theme = 1; root.settings-changed(); } }
             }
+            MenuItem { title: "Cambiar tema (Oscuro ↔ Océano)"; icon: root.theme == 0 ? @image-url("icons/menu/sun.svg") : @image-url("icons/menu/moon.svg"); enabled: !root.modal-open; activated => { root.theme = root.theme == 0 ? 1 : 0; root.settings-changed(); } }
             MenuSeparator {}
-            MenuItem { title: "Acercar"; shortcut: @keys(Control + Shift? + "+"); enabled: !root.modal-open; activated => { root.zoom-in(); } }
-            MenuItem { title: "Alejar"; shortcut: @keys(Control + Shift? + "-"); enabled: !root.modal-open; activated => { root.zoom-out(); } }
+            MenuItem { title: "Aumentar tamaño de fuente (Ctrl++)"; icon: @image-url("icons/menu/a-arrow-up.svg"); shortcut: @keys(Control + Shift? + "+"); enabled: !root.modal-open; activated => { root.zoom-in(); } }
+            MenuItem { title: "Reducir tamaño de fuente (Ctrl+-)"; icon: @image-url("icons/menu/a-arrow-down.svg"); shortcut: @keys(Control + Shift? + "-"); enabled: !root.modal-open; activated => { root.zoom-out(); } }
             MenuItem { title: "Restablecer zoom"; shortcut: @keys(Control + Shift? + "0"); enabled: !root.modal-open; activated => { root.zoom-reset(); } }
             MenuSeparator {}
-            MenuItem { title: "Pantalla completa"; shortcut: @keys(F11); enabled: !root.modal-open; checkable: true; checked: root.is_fullscreen; activated => { root.toggle-fullscreen(); } }
+            MenuItem { title: "Pantalla completa"; icon: @image-url("icons/menu/maximize.svg"); shortcut: @keys(F11); enabled: !root.modal-open; checkable: true; checked: root.is_fullscreen; activated => { root.toggle-fullscreen(); } }
         }
 
         Menu {
             title: "Ir";
-            MenuItem { title: "Ir a línea…"; shortcut: @keys(Control + G); enabled: !root.modal-open; activated => { root.goto_line_input = ""; root.show_goto_line = true; } }
+            MenuItem { title: "Ir a línea…"; icon: @image-url("icons/menu/hash.svg"); shortcut: @keys(Control + G); enabled: !root.modal-open; activated => { root.goto_line_input = ""; root.show_goto_line = true; } }
             MenuItem { title: "Pestaña siguiente"; shortcut: @keys(Control + Tab); enabled: !root.modal-open; activated => { root.next-tab(); } }
             MenuItem { title: "Pestaña anterior"; shortcut: @keys(Control + Shift + Tab); enabled: !root.modal-open; activated => { root.prev-tab(); } }
             MenuSeparator {}
@@ -417,11 +418,19 @@ export component App inherits Window {
         }
 
         Menu {
+            title: "IA";
+            MenuItem { title: "Sugerir nombre con IA"; icon: @image-url("icons/menu/sparkles.svg"); enabled: root.can_ai && !root.ai_busy && !root.modal-open; activated => { root.ai-suggest-name(); } }
+            MenuItem { title: "Configurar IA…"; icon: @image-url("icons/menu/bot.svg"); enabled: !root.modal-open; activated => { root.ai-open-settings(); } }
+            MenuSeparator {}
+            MenuItem { title: "Nombrar borradores automáticamente"; enabled: !root.modal-open; checkable: true; checked <=> root.ai_auto_name_drafts; activated => { root.settings-changed(); } }
+        }
+
+        Menu {
             title: "Ayuda";
-            MenuItem { title: "Atajos de teclado"; shortcut: @keys(F1); enabled: !root.show_settings && !root.show_about && !root.show_goto_line; activated => { root.show_shortcuts = true; } }
+            MenuItem { title: "Atajos de teclado"; icon: @image-url("icons/menu/keyboard.svg"); shortcut: @keys(F1); enabled: !root.show_settings && !root.show_about && !root.show_goto_line; activated => { root.show_shortcuts = true; } }
             MenuItem { title: "¿Cómo funciona el autoguardado?"; enabled: !root.modal-open; activated => { root.show-scratch-help(); } }
             MenuSeparator {}
-            MenuItem { title: "Acerca de LightMark"; enabled: !root.modal-open; activated => { root.show_about = true; } }
+            MenuItem { title: "Acerca de LightMark"; icon: @image-url("icons/menu/info.svg"); enabled: !root.modal-open; activated => { root.show_about = true; } }
         }
     }
 
@@ -443,6 +452,7 @@ export component App inherits Window {
             show-search: root.show_search;
             show-settings: root.show_settings;
             view-mode: root.view_mode;
+            avail-width: root.width;
             show-explorer <=> root.show_explorer;
             word-wrap <=> root.word_wrap;
             show-line-numbers: root.show_line_numbers;
@@ -464,10 +474,24 @@ export component App inherits Window {
             open-browser => { root.open-browser(); }
             open-settings => { root.show_settings = true; }
             settings-changed => { root.settings-changed(); }
-            toggle-theme => { root.toggle-theme(); }
-            toggle-line-numbers => { root.toggle-line-numbers(); }
-            zoom-in => { root.zoom-in(); }
-            zoom-out => { root.zoom-out(); }
+            comment-supported: root.language_label != "json" && root.language_label != "plaintext" && root.language_label != "text";
+            language-name: root.language_label;
+            replace-clicked => { if (!root.show_search) { root.toggle-search-panel(); } root.search_replace_expanded = true; search-panel.focus-search(); }
+            goto-line-clicked => { root.goto_line_input = ""; root.show_goto_line = true; }
+            // Tema / números de línea: se resuelven en Slint y persisten por settings-changed().
+            toggle-theme => { root.theme = root.theme == 0 ? 1 : 0; root.settings-changed(); }
+            toggle-line-numbers => { root.show_line_numbers = !root.show_line_numbers; root.settings-changed(); }
+            zoom-in => { root.zoom-in(); root.focus-editor(); }
+            zoom-out => { root.zoom-out(); root.focus-editor(); }
+            // Las operaciones de línea no deben quitarle el foco al editor.
+            toggle-comment => { root.toggle-comment(); root.focus-editor(); }
+            duplicate-line => { root.duplicate-line(); root.focus-editor(); }
+            delete-line => { root.delete-line(); root.focus-editor(); }
+            move-line-up => { root.move-line-up(); root.focus-editor(); }
+            move-line-down => { root.move-line-down(); root.focus-editor(); }
+            indent-line => { root.indent-line(); root.focus-editor(); }
+            unindent-line => { root.unindent-line(); root.focus-editor(); }
+            join-lines => { root.join-lines(); root.focus-editor(); }
             ai-suggest-name => { root.ai-suggest-name(); }
             ai-open-settings => { root.ai-open-settings(); }
         }
