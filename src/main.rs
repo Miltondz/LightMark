@@ -99,7 +99,10 @@ fn forward_open_requests(app_data_dir: &Path, args: &[String]) {
 /// Sondeado por el temporizador global (una vez por tick, no una vez por ventana): si una
 /// instancia secundaria dejó rutas pendientes, las abre en la ventana destino (la más
 /// reciente, o una nueva si `open_files_in_new_window` está activado — E1) y activa esa
-/// ventana. Sin rutas (marcador vacío) simplemente activa la ventana más reciente.
+/// ventana. Sin rutas (marcador vacío, es decir: `lightmark.exe` lanzado de nuevo sin
+/// argumentos con la app ya abierta) abre una ventana nueva con un borrador vacío — igual
+/// que hacer doble clic en el acceso directo dos veces debe dar dos ventanas, no reenfocar
+/// la que ya existía.
 fn poll_open_requests(app_data_dir: &Path) {
     let path = open_requests_path(app_data_dir);
     let claimed = path.with_extension("processing");
@@ -118,8 +121,9 @@ fn poll_open_requests(app_data_dir: &Path) {
         .map(PathBuf::from)
         .collect();
 
+    let created_new = paths.is_empty() || windows::shared_settings().open_files_in_new_window;
     let target_id = if paths.is_empty() {
-        windows::most_recent()
+        bring_up_window(app_data_dir, None).ok()
     } else if windows::shared_settings().open_files_in_new_window {
         bring_up_window(app_data_dir, None).ok()
     } else {
@@ -128,6 +132,9 @@ fn poll_open_requests(app_data_dir: &Path) {
     let Some(id) = target_id.or_else(|| bring_up_window(app_data_dir, None).ok()) else {
         return;
     };
+    if created_new {
+        renumber_untitled_against_others(id);
+    }
     windows::with_window(id, |ui, state| {
         for p in &paths {
             if p.is_file() {
@@ -168,6 +175,11 @@ fn main() -> Result<(), slint::PlatformError> {
     if restored.is_empty() {
         bring_up_window(&app_data_dir, None)?;
     } else {
+        // Arranque en frío: restaura EXACTAMENTE las ventanas que estaban abiertas al
+        // cerrar (1 si había 1, N si había N) — una ventana adicional nueva y vacía solo
+        // debe aparecer si el usuario vuelve a ejecutar `lightmark.exe` con la app ya
+        // abierta (ver `poll_open_requests`), no como resultado de restaurar la sesión.
+        //
         // Clamp/cascada de geometría (E1): una ventana guardada en un monitor que ya no
         // está conectado no debe abrirse fuera de la pantalla visible.
         let (vx, vy, vw, vh) = virtual_screen_rect();
