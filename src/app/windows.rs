@@ -24,6 +24,7 @@
 
 use super::SharedState;
 use crate::settings::Settings;
+use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::path::Path;
 use std::time::Instant;
@@ -82,6 +83,7 @@ pub fn remove_window(id: u32) -> Option<WindowEntry> {
     })
 }
 
+#[allow(dead_code)] // API pública del registro; sin uso propio en el wiring actual todavía.
 pub fn window_count() -> usize {
     REG.with(|r| r.borrow().windows.len())
 }
@@ -134,6 +136,58 @@ pub fn with_window<T>(id: u32, f: impl FnOnce(&crate::App, &SharedState) -> T) -
 /// HWND Win32 de la ventana `id` (para `SetForegroundWindow` al activarla/desduplicar).
 pub fn hwnd_of(id: u32) -> Option<isize> {
     REG.with(|r| r.borrow().windows.iter().find(|w| w.id == id).map(|w| w.hwnd))
+}
+
+/// Fija el HWND de la ventana `id` (WSE1b): el HWND real de una ventana Slint solo está
+/// disponible tras al menos una vuelta del bucle de eventos siguiente a `show()` (ver
+/// `slint::Window::window_handle` — "may only become available after the window has been
+/// created by the window manager"), así que no puede leerse en el mismo tick en que se
+/// registra la ventana. El llamador (`main.rs::bring_up_window`) programa esto vía
+/// `slint::invoke_from_event_loop` justo después de registrar/mostrar la ventana.
+pub fn set_hwnd(id: u32, hwnd: isize) {
+    REG.with(|r| {
+        let mut reg = r.borrow_mut();
+        if let Some(w) = reg.windows.iter_mut().find(|w| w.id == id) {
+            w.hwnd = hwnd;
+        }
+    });
+}
+
+/// Id de la ventana registrada cuyo `WindowEntry.state` es EXACTAMENTE `state` (mismo
+/// `Rc`), si alguna — usado por `settings_ops` para excluir la ventana de origen al
+/// difundir `settings-changed()` a las demás.
+pub fn id_of_state(state: &SharedState) -> Option<u32> {
+    REG.with(|r| {
+        r.borrow()
+            .windows
+            .iter()
+            .find(|w| std::rc::Rc::ptr_eq(&w.state, state))
+            .map(|w| w.id)
+    })
+}
+
+/// Activa la ventana `id`: `show()` (deshace `hide()`/minimizado), enfoca el editor, la
+/// trae al frente con `SetForegroundWindow` (Win32 — Slint 1.18 no expone una API
+/// multiplataforma para forzar el foco de la ventana del sistema, mismo límite que ya
+/// documentaba `poll_open_requests` en `main.rs` antes de E1) y la marca como la más
+/// reciente (`most_recent()`). Usado tanto para desduplicar la apertura de un archivo ya
+/// abierto en otra ventana como para el traspaso de una segunda instancia del proceso.
+pub fn activate(id: u32) {
+    with_window(id, |ui, _state| {
+        let _ = ui.window().show();
+        ui.invoke_focus_editor();
+    });
+    if let Some(hwnd) = hwnd_of(id)
+        && hwnd != 0
+    {
+        // SAFETY: `hwnd` es el HWND real capturado para esta ventana vía
+        // `raw-window-handle` (ver `main.rs::capture_hwnd`); `SetForegroundWindow` no
+        // tiene requisitos de seguridad adicionales sobre un HWND válido.
+        unsafe {
+            windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd as windows_sys::Win32::Foundation::HWND);
+        }
+    }
+    mark_active(id);
 }
 
 /// Busca en qué ventana está abierto `path` (normalizado por el llamador, ver

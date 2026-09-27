@@ -92,6 +92,9 @@ fn apply_settings_from_ui(ui: &App, state: &SharedState) {
         // `ai_provider` (id) y `ai_consent` no se leen de la UI: los gestiona WS-D
         // (`ai-provider-changed` / diálogo de privacidad).
         st.settings = st.settings.clone().validated();
+        // WSE1b: guardar UNA sola vez aquí (en la ventana que disparó el cambio), no una
+        // vez por ventana — `broadcast_settings_to_other_windows` de abajo solo EMPUJA la
+        // configuración ya guardada a las demás, nunca vuelve a llamar a `.save()`.
         st.settings.save().ok();
     }
     push_settings_to_ui(ui, state);
@@ -109,6 +112,27 @@ fn apply_settings_from_ui(ui: &App, state: &SharedState) {
     if ui.get_show_settings() {
         set_status(ui, "Configuración guardada");
     }
+    broadcast_settings_to_other_windows(state);
+}
+
+/// WSE1b (E1, multi-ventana): cuando `settings-changed()` dispara en UNA ventana, las
+/// DEMÁS ventanas registradas tienen su propia copia en memoria de `AppState.settings`
+/// (cada una con su propio `Theme.current`, hallazgo del plan §10) que se queda
+/// desincronizada si no se actualiza también. Solo empuja (nunca vuelve a guardar en
+/// disco: eso ya lo hizo `apply_settings_from_ui` una sola vez, arriba).
+fn broadcast_settings_to_other_windows(source_state: &SharedState) {
+    let new_settings = source_state.borrow().settings.clone();
+    super::windows::for_each(|other_ui, other_state| {
+        if std::rc::Rc::ptr_eq(other_state, source_state) {
+            return;
+        }
+        other_state.borrow_mut().settings = new_settings.clone();
+        push_settings_to_ui(other_ui, other_state);
+        refresh_flags(other_ui, other_state);
+        refresh_stats(other_ui, other_state, true);
+        super::editor_view_ops::on_settings_changed(other_ui, other_state);
+        refresh_preview_if_visible(other_ui, other_state);
+    });
 }
 
 /// Empuja `state.settings` a las propiedades de la UI (usado tras cargar/restablecer

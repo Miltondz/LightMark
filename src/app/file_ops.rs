@@ -163,6 +163,22 @@ pub fn new_tab(ui: &App, state: &SharedState) {
 /// carga del disco y lo activa. Comparte esta lógica `open-file`, `open-recent`, el
 /// explorador y los argumentos de línea de comandos.
 pub fn open_path(ui: &App, state: &SharedState, path: PathBuf) {
+    // WSE1b (E1, multi-ventana): si `path` ya está abierta en OTRA ventana registrada,
+    // activar esa ventana/pestaña en vez de abrir un segundo duplicado aquí — la
+    // deduplicación de `EditorState::open_file` (más abajo) solo conoce SU PROPIA
+    // ventana. Si está abierta en ESTA MISMA ventana, se deja seguir: `open_file` la
+    // activa localmente sin necesidad de cruzar el registro.
+    let canon = crate::editor::normalize_path(&path);
+    if let Some((win_id, g, i)) = super::windows::find_file(&canon)
+        && super::windows::id_of_state(state) != Some(win_id)
+    {
+        super::windows::with_window(win_id, |other_ui, other_state| {
+            activate_tab(other_ui, other_state, g, i);
+        });
+        super::windows::activate(win_id);
+        set_status(ui, &format!("Ya estaba abierto en otra ventana: {}", path.display()));
+        return;
+    }
     let result = { state.borrow_mut().editor.open_file(path.clone()) };
     match result {
         Ok((g, i)) => {

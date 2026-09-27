@@ -211,6 +211,71 @@ impl Default for SessionV2 {
     }
 }
 
+impl WindowState {
+    /// Extrae los campos "de contenido" (grupos/pestañas/carpeta) como una `Session` v1
+    /// suelta, reutilizando `EditorState::to_session`/`restore_from_session` (que ya
+    /// conocen el formato de `GroupState`/`TabState`) también para una sola ventana de la
+    /// sesión v2, en vez de duplicar esa lógica aquí.
+    pub fn to_session(&self) -> Session {
+        Session {
+            version: 1,
+            name: "window".to_string(),
+            created_at: 0,
+            groups: self.groups.clone(),
+            active_group: self.active_group,
+            group_count: self.groups.len(),
+            workspace_root: self.workspace_root.clone(),
+        }
+    }
+
+    /// Inversa de `to_session`: combina el contenido de una `Session` (tal como la
+    /// produce `EditorState::to_session`) con la geometría/maximizado de esta ventana.
+    pub fn from_session(session: Session, x: i32, y: i32, width: f32, height: f32, maximized: bool) -> Self {
+        WindowState {
+            x,
+            y,
+            width,
+            height,
+            maximized,
+            groups: session.groups,
+            active_group: session.active_group,
+            workspace_root: session.workspace_root,
+        }
+    }
+}
+
+/// Clampa/cascada la posición guardada de una ventana (E1): si el rectángulo
+/// `(x, y, width, height)` no solapa en absoluto el área virtual conectada actualmente
+/// (`vx, vy, vw, vh` — de `GetSystemMetrics(SM_XVIRTUALSCREEN/...)`, el llamador es quien
+/// consulta Win32), la posición guardada quedó fuera de pantalla (p.ej. se desconectó un
+/// monitor secundario donde vivía esa ventana) y se sustituye por una posición visible
+/// cerca de la esquina superior izquierda del área virtual, desplazada `index * 32px`
+/// para que varias ventanas restauradas a la vez no queden exactamente superpuestas.
+/// Si el rectángulo SÍ solapa el área virtual (aunque sea parcialmente, o esté
+/// completamente contenido en un monitor que ya no es el principal pero sigue
+/// conectado), se devuelve sin tocar.
+pub fn clamp_window_position(
+    x: i32,
+    y: i32,
+    width: f32,
+    height: f32,
+    vx: i32,
+    vy: i32,
+    vw: i32,
+    vh: i32,
+    index: u32,
+) -> (i32, i32) {
+    let w = width.max(1.0) as i32;
+    let h = height.max(1.0) as i32;
+    let visible = x < vx + vw && x + w > vx && y < vy + vh && y + h > vy;
+    if visible {
+        (x, y)
+    } else {
+        let offset = (index as i32) * 32;
+        (vx + 60 + offset, vy + 60 + offset)
+    }
+}
+
 impl SessionManager {
     /// Análogo a `save_session` pero para el formato v2 (multi-ventana).
     pub fn save_session_v2(&self, session: &SessionV2, session_id: &str) -> std::io::Result<()> {
@@ -508,5 +573,79 @@ mod tests {
         let loaded = manager.load_session_v2("v2bom").unwrap();
         assert_eq!(loaded.version, 2);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ws_e1b_window_state_to_session_roundtrip_preserves_content() {
+        let ws = WindowState {
+            x: 10,
+            y: 20,
+            width: 800.0,
+            height: 600.0,
+            maximized: true,
+            groups: vec![GroupState {
+                id: 0,
+                tabs: vec![TabState {
+                    document_id: "scratch-1".to_string(),
+                    path: None,
+                    title: "Sin título 1".to_string(),
+                    is_scratch: true,
+                    cursor: 5,
+                    scroll_line: 0,
+                    pinned: false,
+                    unsaved_content: None,
+                    mtime: None,
+                    custom_title: None,
+                    created_at: Some(42),
+                    untitled_n: Some(1),
+                }],
+                active_tab: 0,
+            }],
+            active_group: 0,
+            workspace_root: Some("C:\\proyecto".to_string()),
+        };
+        let session = ws.to_session();
+        assert_eq!(session.groups[0].tabs[0].cursor, 5);
+        assert_eq!(session.workspace_root, Some("C:\\proyecto".to_string()));
+        // La geometría NO viaja por `Session` (formato v1, sin ella): `from_session` la
+        // vuelve a combinar con el contenido restaurado.
+        let ws2 = WindowState::from_session(session, ws.x, ws.y, ws.width, ws.height, ws.maximized);
+        assert_eq!(ws2.x, 10);
+        assert_eq!(ws2.maximized, true);
+        assert_eq!(ws2.groups[0].tabs[0].untitled_n, Some(1));
+    }
+
+    #[test]
+    fn ws_e1b_clamp_window_position_keeps_onscreen_position_unchanged() {
+        // Ventana totalmente dentro del área virtual (1920x1080 en el origen): sin cambios.
+        let (x, y) = clamp_window_position(100, 100, 800.0, 600.0, 0, 0, 1920, 1080, 0);
+        assert_eq!((x, y), (100, 100));
+    }
+
+    #[test]
+    fn ws_e1b_clamp_window_position_keeps_partially_onscreen_position_unchanged() {
+        // Solo una esquina solapa el área virtual: sigue "visible" (parcialmente), no se toca.
+        let (x, y) = clamp_window_position(-700, -500, 800.0, 600.0, 0, 0, 1920, 1080, 0);
+        assert_eq!((x, y), (-700, -500));
+    }
+
+    #[test]
+    fn ws_e1b_clamp_window_position_cascades_fully_offscreen_position() {
+        // Completamente a la derecha del área virtual (monitor desconectado): se cascada
+        // cerca del origen del área virtual, con un offset distinto por índice.
+        let (x0, y0) = clamp_window_position(5000, 5000, 800.0, 600.0, 0, 0, 1920, 1080, 0);
+        assert_eq!((x0, y0), (60, 60));
+        let (x1, y1) = clamp_window_position(5000, 5000, 800.0, 600.0, 0, 0, 1920, 1080, 1);
+        assert_eq!((x1, y1), (92, 92));
+        assert_ne!((x0, y0), (x1, y1));
+    }
+
+    #[test]
+    fn ws_e1b_clamp_window_position_respects_nonzero_virtual_origin() {
+        // Área virtual que no empieza en (0,0) (monitor secundario a la izquierda del
+        // principal, área virtual total x en [-1920, 1920)): una posición REALMENTE fuera
+        // de ese rango se cascada relativa a ESE origen, no a (0,0).
+        let (x, y) = clamp_window_position(5000, 5000, 800.0, 600.0, -1920, 0, 3840, 1080, 0);
+        assert_eq!((x, y), (-1860, 60));
     }
 }

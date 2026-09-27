@@ -186,6 +186,14 @@ export component App inherits Window {
     callback close-tab(int);
     callback close-all();
     callback exit-app();
+
+    // Multi-ventana (E1/WSE1b): títulos de las DEMÁS ventanas registradas (para el
+    // submenú "Mover pestaña a ventana"; el índice `i` de este modelo es el que recibe
+    // `move-tab-to-window`, resuelto por Rust contra `app::windows::snapshot_ids()`).
+    in property <[string]> other_windows_titles;
+    callback new-window();
+    callback move-tab-to-new-window();
+    callback move-tab-to-window(int);
     // Se dispara en cada clic de pestaña (ver TabBar más abajo). A diferencia de asignar
     // `active_tab` directamente desde Slint, pasar por Rust evita que `editor_text`
     // quede desincronizado del documento de la pestaña recién activada.
@@ -320,6 +328,17 @@ export component App inherits Window {
             MenuItem { title: "Guardar todo"; icon: @image-url("icons/menu/save-all.svg"); shortcut: @keys(Control + Alt + S); enabled: root.can_save_all && !root.modal-open; activated => { root.save-all(); } }
             MenuSeparator {}
             MenuItem { title: "Exportar borradores a ZIP…"; icon: @image-url("icons/menu/archive.svg"); enabled: !root.modal-open; activated => { root.export-zip(); } }
+            MenuSeparator {}
+            MenuItem { title: "Nueva ventana"; icon: @image-url("icons/menu/app-window.svg"); shortcut: @keys(Control + Shift + N); enabled: !root.modal-open; activated => { root.new-window(); } }
+            MenuItem { title: "Mover pestaña a nueva ventana"; enabled: !root.modal-open && root.tabs.length > 0; activated => { root.move-tab-to-new-window(); } }
+            Menu {
+                title: "Mover pestaña a ventana";
+                enabled: root.other_windows_titles.length > 0 && !root.modal-open && root.tabs.length > 0;
+                for name[i] in root.other_windows_titles: MenuItem {
+                    title: name;
+                    activated => { root.move-tab-to-window(i); }
+                }
+            }
             MenuSeparator {}
             MenuItem { title: "Cerrar pestaña"; icon: @image-url("icons/menu/x-square.svg"); shortcut: @keys(Control + W); enabled: !root.modal-open; activated => { root.close-tab(root.active_tab); } }
             MenuItem { title: "Cerrar todas"; enabled: !root.modal-open; activated => { root.close-all(); } }
@@ -463,6 +482,7 @@ export component App inherits Window {
             ai-busy: root.ai_busy;
             ai-status: root.ai_status;
             new-tab => { root.new-tab(); }
+            new-window => { root.new-window(); }
             open-file => { root.open-file(); }
             save => { root.save(); }
             save-all => { root.save-all(); }

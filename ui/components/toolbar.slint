@@ -88,6 +88,7 @@ export component Toolbar inherits Rectangle {
     in property <length> avail-width: 1200px;
 
     callback new-tab();
+    callback new-window();
     callback open-file();
     callback save();
     callback save-all();
@@ -145,6 +146,7 @@ export component Toolbar inherits Rectangle {
         IconButton { icon: @image-url("../icons/folder-open.svg"); tooltip-text: "Abrir (Ctrl+O)"; clicked => { root.open-file(); } }
         IconButton { icon: @image-url("../icons/save.svg"); tooltip-text: "Guardar (Ctrl+S)"; enabled: root.can-save; clicked => { root.save(); } }
         IconButton { icon: @image-url("../icons/save-all.svg"); tooltip-text: "Guardar todo (Ctrl+Alt+S)"; enabled: root.can-save-all; clicked => { root.save-all(); } }
+        if root.level >= 1: IconButton { icon: @image-url("../icons/app-window.svg"); tooltip-text: "Nueva ventana (Ctrl+Shift+N)"; clicked => { root.new-window(); } }
         GroupSep {}
 
         // ── Edición ──

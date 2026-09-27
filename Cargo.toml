@@ -10,12 +10,20 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision"] }
 pulldown-cmark = "0.13"
 regex = "1"
-rfd = "0.15"
+# `common-controls-v6`: sin ella, las etiquetas personalizadas de `YesNoCancelCustom`
+# (diálogo de cierre de ventana no-última, E1) no se aplican en Windows y el diálogo cae
+# a las etiquetas Sí/No/Cancelar por defecto.
+rfd = { version = "0.15", features = ["common-controls-v6"] }
 time = { version = "0.3", features = ["local-offset"] }
 unicode-linebreak = "0.1"
 ureq = { version = "3.4", default-features = false, features = ["native-tls-no-default"] }
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 arboard = "3"
+# Ya resuelta transitivamente (winit/slint/rfd la usan con esta misma versión — ver
+# Cargo.lock); se declara explícita para poder leer `RawWindowHandle::Win32` desde
+# `app::windows` (E1, multi-ventana: HWND por ventana para SetForegroundWindow/dedup).
+raw-window-handle = "0.6"
 
 [build-dependencies]
 slint-build = "1.18"
+embed-manifest = "1.4"
