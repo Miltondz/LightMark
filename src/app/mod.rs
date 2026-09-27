@@ -8,9 +8,12 @@
 //! del main.rs original), todo callback termina llamando a una de las `refresh_*` de
 //! aquí, que son la única fuente de verdad de cómo se deriva el estado de la UI.
 
+pub mod ai_ops;
 pub mod edit_ops;
+pub mod editor_view_ops;
 pub mod explorer_ops;
 pub mod file_ops;
+pub mod naming_ops;
 pub mod search_ops;
 pub mod settings_ops;
 pub mod view_ops;
@@ -86,6 +89,12 @@ pub struct AppState {
     /// "Reemplazado", "Documento formateado") casi de inmediato. Se limpia en cuanto el
     /// conflicto deja de aplicarse (se guarda, se recarga, o cambia de pestaña activa).
     pub external_conflict_warned_for: Option<std::path::PathBuf>,
+    /// Estado de la vista del editor (resaltado + gutter); lo rellena WS-A.
+    #[allow(dead_code)] // wave-1 fills (WS-A)
+    pub view: editor_view_ops::EditorViewState,
+    /// Id monótono de la última petición de IA; las respuestas con id viejo se descartan (WS-D).
+    #[allow(dead_code)] // wave-1 fills (WS-D)
+    pub ai_request_id: u64,
 }
 
 pub type SharedState = Rc<RefCell<AppState>>;
@@ -108,6 +117,8 @@ impl AppState {
             last_autosave_error_shown: None,
             autosave_retry_after: std::collections::HashMap::new(),
             external_conflict_warned_for: None,
+            view: editor_view_ops::EditorViewState::default(),
+            ai_request_id: 0,
         }
     }
 }
@@ -120,6 +131,8 @@ pub fn wire_all(ui: &App, state: &SharedState) {
     view_ops::wire(ui, state);
     explorer_ops::wire(ui, state);
     settings_ops::wire(ui, state);
+    editor_view_ops::wire(ui, state);
+    ai_ops::wire(ui, state);
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +154,7 @@ pub fn refresh_tabs(ui: &App, state: &SharedState) {
             title: t.title.clone().into(),
             dirty: t.is_dirty(),
             tooltip: t.tooltip().into(),
+            untitled: t.is_scratch(),
         })
         .collect();
     ui.set_tabs(ModelRc::new(VecModel::from(tabs)));
@@ -257,6 +271,7 @@ pub fn refresh_flags(ui: &App, state: &SharedState) {
     ui.set_can_save(can_save);
     ui.set_can_save_all(any_tab_dirty(&state.borrow().editor));
     ui.set_can_format(can_format);
+    ui.set_comment_marker(crate::textops::comment_marker_label(&lang).into());
     ui.set_language_label(lang.into());
     ui.set_line_ending(line_ending.into());
     ui.set_preview_available(available);
@@ -303,6 +318,7 @@ pub fn refresh_on_tick(ui: &App, state: &SharedState) {
     ui.set_can_save(can_save);
     ui.set_can_save_all(any_tab_dirty(&state.borrow().editor));
     ui.set_can_format(can_format);
+    ui.set_comment_marker(crate::textops::comment_marker_label(&lang).into());
     ui.set_language_label(lang.clone().into());
     ui.set_line_ending(line_ending.into());
     ui.set_preview_available(available);
@@ -421,6 +437,7 @@ pub fn push_active_document_to_ui(ui: &App, state: &SharedState) {
         st.session_dirty = true;
         st.last_line_count = 0; // fuerza recomputar el gutter en el siguiente refresh
     }
+    editor_view_ops::on_document_replaced(ui, state);
 }
 
 /// El refresco "completo": pestañas + banderas + estadísticas (forzando el gutter) +

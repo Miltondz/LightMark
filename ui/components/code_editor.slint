@@ -8,6 +8,15 @@ import { Theme } from "../theme.slint";
 // Limitación conocida de Slint 1.18: con `wrap` activo el nº de líneas visuales no
 // coincide con las líneas lógicas del texto, así que el gutter de números se oculta
 // cuando `wrap` está activo (ver PLAN.md / UI_CONTRACT.md).
+// Fragmento de texto coloreado del overlay de resaltado (WS-A): x/y relativos al origen
+// del TextInput (coordenadas de contenido).
+export struct EditorSpan {
+    x: length,
+    y: length,
+    text: string,
+    color: color,
+}
+
 export component CodeEditor inherits Rectangle {
     in property <string> font-family: "Consolas";
     in property <length> font-size: 14px;
@@ -17,6 +26,29 @@ export component CodeEditor inherits Rectangle {
     in property <bool> read-only: false;
     in property <bool> interactive: true;
     in-out property <string> text;
+
+    // ── Interfaz de la wave 0 para WS-A (resaltado por overlay + gutter con filas visuales).
+    // Solo declaradas/medidas aquí; el comportamiento lo rellena WS-A (ver PLAN2 §4.2, §6).
+    in property <[EditorSpan]> hl-spans;
+    in property <bool> hl-active: false;
+    in property <string> gutter-text: "";
+    in property <int> gutter-first-row: 0;
+    in property <string> gutter-width-sample: "999";
+    in-out property <string> measure-text: "0";
+    out property <length> measure-width: measurer.preferred-width;
+    out property <length> measure-height: measurer.preferred-height;
+    out property <length> wrap-width: text-input.width;
+    out property <length> view-width: scroll-view.visible-width;
+    out property <length> scroll-x: -scroll-view.content-x;
+    out property <int> first-visible-row: max(0, Math.floor(-scroll-view.content-y / root.line-height));
+    out property <int> visible-rows: Math.ceil(scroll-view.visible-height / root.line-height) + 1;
+    callback viewport-changed();
+    measurer := Text {
+        visible: false;
+        text: root.measure-text;
+        font-family: root.font-family;
+        font-size: root.font-size;
+    }
 
     out property <int> cursor-byte-offset: text-input.cursor-position-byte-offset;
     out property <int> anchor-byte-offset: text-input.anchor-position-byte-offset;
@@ -28,7 +60,7 @@ export component CodeEditor inherits Rectangle {
     // `TextInput`, así que el resaltado de línea actual y el auto-scroll iban un par de
     // píxeles desalineados con fuentes/tamaños distintos de los probados). Se mide con
     // un `Text` oculto de una sola línea con la misma fuente/tamaño.
-    property <length> line-height: line-height-measure.preferred-height;
+    out property <length> line-height: line-height-measure.preferred-height;
     line-height-measure := Text {
         visible: false;
         text: "0";

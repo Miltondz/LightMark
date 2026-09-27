@@ -3,7 +3,7 @@
 //! Punto de entrada. La UI vive por completo en `ui/*.slint` (compilada por `build.rs`
 //! vía `slint-build`, expuesta aquí con `slint::include_modules!()`); toda la lógica
 //! vive en módulos (`editor`, `textops`, `settings`, `scratch`, `session`, `search`,
-//! `workspace`, `format`, `highlight`, `markdown`, `preview`) y el cableado de
+//! `workspace`, `format`, `syntax`, `editor_view`, `ai`, `markdown`, `preview`) y el cableado de
 //! callbacks en `app/*` (ver `app::wire_all`). Este archivo solo: carga configuración y
 //! sesión, crea la ventana, cablea callbacks, aplica los argumentos de línea de
 //! comandos, registra el temporizador de 150 ms y el cierre con "hot exit", y arranca
@@ -11,16 +11,18 @@
 
 slint::include_modules!();
 
+mod ai;
 mod app;
 mod editor;
+mod editor_view;
 mod format;
-mod highlight;
 mod markdown;
 mod preview;
 mod scratch;
 mod search;
 mod session;
 mod settings;
+mod syntax;
 mod textops;
 mod workspace;
 
@@ -281,6 +283,7 @@ fn on_tick(ui: &App, state: &SharedState, app_data_dir: &Path) {
         // suyo por separado.
         app::refresh_on_tick(ui, state);
     }
+    app::naming_ops::on_tick(ui, state);
     // Hallazgo W5: recomputar la búsqueda al ritmo del timer, no en cada tecla.
     app::search_ops::search_tick(ui, state);
     autosave_tick(ui, state);

@@ -11,7 +11,10 @@ serde_json = { version = "1", features = ["preserve_order", "arbitrary_precision
 pulldown-cmark = "0.13"
 regex = "1"
 rfd = "0.15"
-time = "0.3"
+time = { version = "0.3", features = ["local-offset"] }
+unicode-linebreak = "0.1"
+ureq = { version = "3.4", default-features = false, features = ["native-tls-no-default"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Credentials", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
 arboard = "3"
 
 [build-dependencies]

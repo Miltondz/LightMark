@@ -224,6 +224,17 @@ fn comment_markers(lang: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Etiqueta corta del marcador de comentario del lenguaje, para tooltips: `"//"`,
+/// `"#"`, `"--"`, `";"` o `"<!-- -->"`.
+pub fn comment_marker_label(lang: &str) -> String {
+    let (open, close) = comment_markers(lang);
+    if close.is_empty() {
+        open.trim().to_string()
+    } else {
+        format!("{} {}", open.trim(), close.trim())
+    }
+}
+
 /// Alterna el comentario de la(s) línea(s) seleccionadas. Si todas las líneas no vacías ya
 /// están comentadas, las descomenta; en caso contrario, comenta las no vacías. Conserva la
 /// indentación de cada línea.

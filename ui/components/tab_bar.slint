@@ -4,6 +4,8 @@ export struct TabInfo {
     title: string,
     dirty: bool,
     tooltip: string,
+    // true para borradores (WS-B lo usa para cursiva / tooltip)
+    untitled: bool,
 }
 
 component TabItem inherits Rectangle {

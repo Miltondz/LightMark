@@ -1,0 +1,158 @@
+import { Button, ComboBox, SpinBox, Switch, LineEdit, ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { ModalShell } from "dialogs.slint";
+
+// Diálogo "Inteligencia artificial" (WS-D). Interfaz FIJADA en la wave 0 (ver PLAN2 §4.3
+// y §9.2); WS-D solo refina el aspecto/comportamiento sin cambiar nombres ni tipos.
+export component AiSettingsDialog inherits ModalShell {
+    card-width: 520px;
+    card-height: 620px;
+    dialog-title: "Inteligencia artificial";
+
+    in-out property <bool> ai-enabled: false;
+    in-out property <int> provider-index: 0;
+    in property <[string]> provider-names;
+    in property <[string]> model-names;
+    in-out property <string> model: "";
+    in-out property <string> base-url: "";
+    in property <bool> base-url-editable: false;
+    in property <bool> needs-key: true;
+    in property <bool> key-stored: false;
+    in-out property <string> key-input: "";
+    in-out property <bool> auto-name-drafts: false;
+    in-out property <bool> suggest-on-save-as: true;
+    in-out property <int> name-candidates: 3;
+    in property <bool> busy: false;
+    in property <string> status: "";
+
+    callback settings-changed();
+    callback provider-changed(int);
+    callback refresh-models();
+    callback save-key();
+    callback delete-key();
+    callback test-connection();
+
+    property <bool> show-key: false;
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 10px;
+            padding-right: 8px;
+
+            Text {
+                text: "Cuando uses una acción de IA, LightMark enviará un fragmento del documento (hasta 2000 caracteres) al proveedor seleccionado. Nada se envía automáticamente salvo que actives «Nombrar borradores automáticamente». La clave se guarda cifrada en el Administrador de credenciales de Windows.";
+                wrap: word-wrap;
+                font-size: Theme.font-size-small;
+                color: Theme.text-muted;
+            }
+            Switch { text: "Activar funciones de IA"; checked <=> root.ai-enabled; toggled => { root.settings-changed(); } }
+
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Proveedor:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                ComboBox {
+                    model: root.provider-names;
+                    current-index: root.provider-index;
+                    selected(v) => { root.provider-changed(self.current-index); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Modelo:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                ComboBox {
+                    model: root.model-names;
+                    selected(v) => { root.model = v; root.settings-changed(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "ID de modelo:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.model; edited(t) => { root.settings-changed(); } }
+                Button { text: "Actualizar lista"; enabled: !root.busy; clicked => { root.refresh-models(); } }
+            }
+            if root.base-url-editable: HorizontalLayout {
+                spacing: 8px;
+                Text { text: "URL base:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                LineEdit { text <=> root.base-url; edited(t) => { root.settings-changed(); } }
+            }
+            if root.needs-key: HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Clave API:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                LineEdit {
+                    text <=> root.key-input;
+                    input-type: root.show-key ? InputType.text : InputType.password;
+                    placeholder-text: "Pega aquí tu clave";
+                }
+                Button { text: root.show-key ? "Ocultar" : "Ver"; clicked => { root.show-key = !root.show-key; } }
+            }
+            if root.needs-key: HorizontalLayout {
+                spacing: 8px;
+                Button { text: "Guardar clave"; clicked => { root.save-key(); } }
+                Button { text: "Borrar clave"; enabled: root.key-stored; clicked => { root.delete-key(); } }
+                Text { text: root.key-stored ? "Clave guardada ✓" : "Sin clave"; color: Theme.text-muted; vertical-alignment: center; }
+            }
+            HorizontalLayout {
+                alignment: start;
+                Button { text: "Probar conexión"; enabled: !root.busy; clicked => { root.test-connection(); } }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            Switch { text: "Nombrar borradores automáticamente"; checked <=> root.auto-name-drafts; toggled => { root.settings-changed(); } }
+            Switch { text: "Sugerir nombre al «Guardar como»"; checked <=> root.suggest-on-save-as; toggled => { root.settings-changed(); } }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Candidatos:"; color: Theme.text; vertical-alignment: center; width: 110px; }
+                SpinBox { minimum: 1; maximum: 5; value <=> root.name-candidates; edited(v) => { root.settings-changed(); } }
+            }
+            Text {
+                text: root.status;
+                wrap: word-wrap;
+                font-size: Theme.font-size-small;
+                color: (root.status.starts-with("Error") || root.status.starts-with("No se")) ? Theme.danger : Theme.text-muted;
+            }
+        }
+    }
+
+    HorizontalLayout {
+        alignment: end;
+        Button { text: "Cerrar"; clicked => { root.close(); } }
+    }
+}
+
+// Diálogo de candidatos de nombre de archivo (WS-D / D2).
+export component NamePickerDialog inherits ModalShell {
+    card-width: 460px;
+    card-height: 380px;
+    dialog-title: "Nombre sugerido";
+
+    in property <[string]> suggestions;
+    in-out property <string> choice: "";
+    in property <bool> busy: false;
+
+    callback picked(string);
+    callback regenerate();
+
+    VerticalLayout {
+        vertical-stretch: 1;
+        spacing: 6px;
+        for s in root.suggestions: Rectangle {
+            height: 30px;
+            border-radius: Theme.radius-small;
+            background: root.choice == s ? Theme.selection : (ta.has-hover ? Theme.hover : transparent);
+            Text { x: 10px; text: s; color: Theme.text; vertical-alignment: center; overflow: elide; width: parent.width - 20px; }
+            ta := TouchArea { clicked => { root.choice = s; } }
+        }
+        Rectangle { vertical-stretch: 1; }
+        LineEdit { text <=> root.choice; accepted => { root.picked(root.choice); } }
+    }
+
+    HorizontalLayout {
+        alignment: end;
+        spacing: 6px;
+        Button { text: "Regenerar"; enabled: !root.busy; clicked => { root.regenerate(); } }
+        Button { text: "Cancelar"; clicked => { root.close(); } }
+        Button { text: "Usar"; primary: true; enabled: root.choice != ""; clicked => { root.picked(root.choice); } }
+    }
+}

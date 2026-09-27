@@ -5,7 +5,7 @@ import { IconButton } from "icon_button.slint";
 // Fondo atenuado + tarjeta centrada reutilizable para todos los diálogos modales.
 // Inherita de FocusScope (no de Rectangle) para poder recibir `key-pressed` y
 // cerrar con Escape.
-component ModalShell inherits FocusScope {
+export component ModalShell inherits FocusScope {
     in property <length> card-width: 480px;
     in property <length> card-height: 360px;
     in property <string> dialog-title: "";
@@ -86,7 +86,7 @@ component ModalShell inherits FocusScope {
     }
 }
 
-component SectionLabel inherits Text {
+export component SectionLabel inherits Text {
     font-size: Theme.font-size-normal;
     font-weight: 700;
     color: Theme.section-label;
@@ -95,7 +95,7 @@ component SectionLabel inherits Text {
 // ── Diálogo de Configuración ─────────────────────────────────────────
 export component SettingsDialog inherits ModalShell {
     card-width: 460px;
-    card-height: 600px;
+    card-height: 640px;
     dialog-title: "Configuración";
 
     in-out property <string> font-family: "Consolas";
@@ -114,8 +114,16 @@ export component SettingsDialog inherits ModalShell {
     in-out property <bool> preview-selectable: false;
     // R3: 0 = "Oscuro", 1 = "Océano".
     in-out property <int> theme: 0;
+    // Wave 0: nuevos ajustes (WS-A / WS-B / WS-D)
+    in-out property <bool> syntax-highlighting: true;
+    in-out property <bool> draft-auto-name: true;
+    in-out property <int> draft-date-format: 0;
+    in-out property <int> draft-date-position: 1;
+    in-out property <bool> draft-date-in-tab: false;
+    in-out property <bool> ai-enabled: false;
 
     callback settings-changed();
+    callback ai-open-settings();
     callback open-data-folder();
     callback reset-settings();
 
@@ -148,6 +156,37 @@ export component SettingsDialog inherits ModalShell {
             Switch { text: "Insertar espacios en vez de tabulaciones"; checked <=> root.insert-spaces; toggled => { root.settings-changed(); } }
             Switch { text: "Ajuste de línea"; checked <=> root.word-wrap; toggled => { root.settings-changed(); } }
             Switch { text: "Mostrar números de línea"; checked <=> root.show-line-numbers; toggled => { root.settings-changed(); } }
+            Switch { text: "Resaltado de sintaxis"; checked <=> root.syntax-highlighting; toggled => { root.settings-changed(); } }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Borradores"; }
+            Switch { text: "Nombre automático a partir del contenido"; checked <=> root.draft-auto-name; toggled => { root.settings-changed(); } }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Formato de fecha:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["Sin fecha", "dd-mm-aaaa", "aaaa-mm-dd"];
+                    current-value: root.draft-date-format == 1 ? "dd-mm-aaaa" : root.draft-date-format == 2 ? "aaaa-mm-dd" : "Sin fecha";
+                    selected(v) => {
+                        root.draft-date-format = v == "dd-mm-aaaa" ? 1 : v == "aaaa-mm-dd" ? 2 : 0;
+                        root.settings-changed();
+                    }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Posición de la fecha:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["Antes del nombre", "Después del nombre"];
+                    current-value: root.draft-date-position == 0 ? "Antes del nombre" : "Después del nombre";
+                    selected(v) => {
+                        root.draft-date-position = v == "Antes del nombre" ? 0 : 1;
+                        root.settings-changed();
+                    }
+                }
+            }
+            Switch { text: "Mostrar la fecha también en la pestaña"; checked <=> root.draft-date-in-tab; toggled => { root.settings-changed(); } }
 
             Rectangle { height: 1px; background: Theme.border; }
 
@@ -198,6 +237,15 @@ export component SettingsDialog inherits ModalShell {
             Switch { text: "Barra de estado"; checked <=> root.show-status-bar; toggled => { root.settings-changed(); } }
             Switch { text: "Mostrar explorador"; checked <=> root.show-explorer; toggled => { root.settings-changed(); } }
             Switch { text: "Vista previa: texto seleccionable"; checked <=> root.preview-selectable; toggled => { root.settings-changed(); } }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Inteligencia artificial"; }
+            Switch { text: "Activar funciones de IA"; checked <=> root.ai-enabled; toggled => { root.settings-changed(); } }
+            HorizontalLayout {
+                alignment: start;
+                Button { text: "Configurar IA…"; clicked => { root.ai-open-settings(); } }
+            }
 
             Rectangle { height: 1px; background: Theme.border; }
 

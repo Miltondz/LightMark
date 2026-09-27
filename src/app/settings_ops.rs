@@ -78,12 +78,26 @@ fn apply_settings_from_ui(ui: &App, state: &SharedState) {
         // en `true` sin importar lo guardado.
         s.preview_selectable = ui.get_preview_selectable();
         s.theme = ui.get_theme().max(0) as u32;
+        s.syntax_highlighting = ui.get_syntax_highlighting();
+        s.draft_auto_name = ui.get_draft_auto_name();
+        s.draft_date_format = ui.get_draft_date_format().max(0) as u32;
+        s.draft_date_position = ui.get_draft_date_position().max(0) as u32;
+        s.draft_date_in_tab = ui.get_draft_date_in_tab();
+        s.ai_enabled = ui.get_ai_enabled();
+        s.ai_model = ui.get_ai_model().to_string();
+        s.ai_base_url = ui.get_ai_base_url().to_string();
+        s.ai_auto_name_drafts = ui.get_ai_auto_name_drafts();
+        s.ai_suggest_on_save_as = ui.get_ai_suggest_on_save_as();
+        s.ai_name_candidates = ui.get_ai_name_candidates().max(0) as u32;
+        // `ai_provider` (id) y `ai_consent` no se leen de la UI: los gestiona WS-D
+        // (`ai-provider-changed` / diálogo de privacidad).
         st.settings = st.settings.clone().validated();
         st.settings.save().ok();
     }
     push_settings_to_ui(ui, state);
     refresh_flags(ui, state);
     refresh_stats(ui, state, true);
+    super::editor_view_ops::on_settings_changed(ui, state);
     // Hallazgo W21: si el tamaño de fuente cambió desde el diálogo de Configuración (no
     // solo con los botones de zoom), la vista previa debe reflejarlo también.
     refresh_preview_if_visible(ui, state);
@@ -116,6 +130,17 @@ pub fn push_settings_to_ui(ui: &App, state: &SharedState) {
     ui.set_show_explorer(s.show_explorer);
     ui.set_preview_selectable(s.preview_selectable);
     ui.set_theme(s.theme as i32);
+    ui.set_syntax_highlighting(s.syntax_highlighting);
+    ui.set_draft_auto_name(s.draft_auto_name);
+    ui.set_draft_date_format(s.draft_date_format as i32);
+    ui.set_draft_date_position(s.draft_date_position as i32);
+    ui.set_draft_date_in_tab(s.draft_date_in_tab);
+    ui.set_ai_enabled(s.ai_enabled);
+    ui.set_ai_model(s.ai_model.into());
+    ui.set_ai_base_url(s.ai_base_url.into());
+    ui.set_ai_auto_name_drafts(s.ai_auto_name_drafts);
+    ui.set_ai_suggest_on_save_as(s.ai_suggest_on_save_as);
+    ui.set_ai_name_candidates(s.ai_name_candidates as i32);
     ui.set_zoom_level(s.font_size as f32 / 14.0);
 }
 

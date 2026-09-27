@@ -1,18 +1,17 @@
 import { Theme } from "theme.slint";
-import { IconButton } from "components/icon_button.slint";
-import { ToolbarSeparator } from "components/separator.slint";
-import { SegmentedControl, SegmentInfo } from "components/segmented_control.slint";
 import { TabBar, TabInfo } from "components/tab_bar.slint";
-import { CodeEditor } from "components/code_editor.slint";
+import { CodeEditor, EditorSpan } from "components/code_editor.slint";
+import { Toolbar } from "components/toolbar.slint";
 import { SearchPanel } from "components/search_panel.slint";
 import { Explorer, ExplorerEntry } from "components/explorer.slint";
 import { PreviewPanel, PreviewLine } from "components/preview_panel.slint";
 import { StatusBar } from "components/status_bar.slint";
+import { AiSettingsDialog, NamePickerDialog } from "components/ai_dialogs.slint";
 import { SettingsDialog, ShortcutsDialog, AboutDialog, GotoLineDialog, ShortcutEntry } from "components/dialogs.slint";
 
 // Re-exportamos los structs de datos para que estén disponibles en el
 // binding de Rust generado a partir de este documento (ver UI_CONTRACT.md).
-export { PreviewLine, TabInfo, ExplorerEntry, ShortcutEntry }
+export { PreviewLine, TabInfo, ExplorerEntry, ShortcutEntry, EditorSpan }
 
 export component App inherits Window {
     min-width: 640px;
@@ -108,6 +107,54 @@ export component App inherits Window {
     // Recientes (hasta 10 rutas; el menú "Recientes" usa slots fijos)
     in property <[string]> recent_files;
 
+    // ── Vista del editor (WS-A rellena desde Rust) ──
+    in property <[EditorSpan]> editor_hl_spans;
+    in property <bool> editor_hl_active: false;
+    in property <string> editor_gutter_text: "";
+    in property <int> editor_gutter_first_row: 0;
+    in property <string> editor_gutter_width_sample: "999";
+    in-out property <string> editor_measure_text <=> editor.measure-text;
+    out property <length> editor_measure_width: editor.measure-width;
+    out property <length> editor_measure_height: editor.measure-height;
+    out property <length> editor_line_height: editor.line-height;
+    out property <length> editor_wrap_width: editor.wrap-width;
+    out property <length> editor_view_width: editor.view-width;
+    out property <length> editor_scroll_x: editor.scroll-x;
+    out property <int> editor_first_visible_row: editor.first-visible-row;
+    out property <int> editor_visible_rows: editor.visible-rows;
+    in-out property <bool> syntax_highlighting: true;
+    // Marcador de comentario del lenguaje activo ("//", "#", "--", ";", "<!-- -->")
+    in property <string> comment_marker: "//";
+
+    // ── Borradores: nombres (Configuración <-> UI) ──
+    in-out property <bool> draft_auto_name: true;
+    in-out property <int> draft_date_format: 0;       // 0 ninguna, 1 dd-mm-aaaa, 2 aaaa-mm-dd
+    in-out property <int> draft_date_position: 1;     // 0 prefijo, 1 sufijo
+    in-out property <bool> draft_date_in_tab: false;
+
+    // ── IA (ajustes no secretos) ──
+    in-out property <bool> ai_enabled: false;
+    in-out property <int> ai_provider_index: 0;
+    in property <[string]> ai_provider_names;
+    in property <[string]> ai_model_names;
+    in-out property <string> ai_model: "";
+    in-out property <string> ai_base_url: "";
+    in property <bool> ai_base_url_editable: false;
+    in property <bool> ai_needs_key: true;
+    in property <bool> ai_key_stored: false;
+    // Rust lo limpia justo tras guardar; NUNCA se empuja desde Rust con una clave real.
+    in-out property <string> ai_key_input: "";
+    in-out property <bool> ai_auto_name_drafts: false;
+    in-out property <bool> ai_suggest_on_save_as: true;
+    in-out property <int> ai_name_candidates: 3;
+    in property <bool> ai_busy: false;
+    in property <string> ai_status: "";
+    in-out property <bool> show_ai_settings: false;
+    in-out property <bool> show_name_picker: false;
+    in property <[string]> ai_name_suggestions;
+    in-out property <string> ai_name_choice: "";
+    in property <bool> can_ai: false;
+
     // Diálogos
     in-out property <bool> show_settings: false;
     in-out property <bool> show_shortcuts: false;
@@ -119,7 +166,7 @@ export component App inherits Window {
 
     // `true` mientras cualquier diálogo modal está abierto: gatea los atajos del
     // MenuBar (U2) para que no disparen acciones "por detrás" del overlay.
-    property <bool> modal-open: root.show_settings || root.show_shortcuts || root.show_about || root.show_goto_line;
+    property <bool> modal-open: root.show_settings || root.show_shortcuts || root.show_about || root.show_goto_line || root.show_ai_settings || root.show_name_picker;
     // Expuesto para gatear atajos que solo deben actuar cuando el editor tiene el
     // foco real (p.ej. Alt+Up/Down no deben mover líneas mientras se escribe en
     // el buscador u otro campo — ver U2/R1_FIXES E2).
@@ -195,6 +242,21 @@ export component App inherits Window {
     callback reset-settings();
     callback open-app-folder();
     callback show-scratch-help();
+
+    // ── Wave 0: contrato nuevo (los implementan WS-A / WS-B / WS-C / WS-D) ──
+    callback editor-viewport-changed();
+    callback toggle-theme();
+    callback toggle-line-numbers();
+    callback ai-open-settings();
+    callback ai-provider-changed(int);
+    callback ai-refresh-models();
+    callback ai-save-key();
+    callback ai-delete-key();
+    callback ai-test-connection();
+    callback ai-suggest-name();
+    callback ai-name-picked(string);
+    callback ai-name-regenerate();
+    callback reorder-tab(int, int);
 
     // ── Editor: edición de texto / cursor ──
     callback text-edited(string);
@@ -371,50 +433,43 @@ export component App inherits Window {
         padding: 0px;
 
         // ── Barra de herramientas ──────────────────────────────────
-        if root.show_toolbar: Rectangle {
-            height: Theme.toolbar-height;
-            background: Theme.sidebar-bg;
-
-            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Theme.border; }
-
-            HorizontalLayout {
-                padding-left: 6px;
-                padding-right: 6px;
-                spacing: 4px;
-
-                IconButton { icon: @image-url("icons/file-plus.svg"); tooltip-text: "Nuevo (Ctrl+N)"; clicked => { root.new-tab(); } }
-                IconButton { icon: @image-url("icons/folder-open.svg"); tooltip-text: "Abrir (Ctrl+O)"; clicked => { root.open-file(); } }
-                IconButton { icon: @image-url("icons/save.svg"); tooltip-text: "Guardar (Ctrl+S)"; enabled: root.can_save; clicked => { root.save(); } }
-                IconButton { icon: @image-url("icons/save-all.svg"); tooltip-text: "Guardar todo (Ctrl+Alt+S)"; enabled: root.can_save_all; clicked => { root.save-all(); } }
-                ToolbarSeparator {}
-
-                IconButton { icon: @image-url("icons/undo.svg"); tooltip-text: "Deshacer (Ctrl+Z)"; enabled: root.can_undo; clicked => { root.undo(); } }
-                IconButton { icon: @image-url("icons/redo.svg"); tooltip-text: "Rehacer (Ctrl+Y)"; enabled: root.can_redo; clicked => { root.redo(); } }
-                ToolbarSeparator {}
-
-                IconButton { icon: @image-url("icons/search.svg"); tooltip-text: "Buscar (Ctrl+F)"; active: root.show_search; clicked => { root.toggle-search-panel(); if (root.show_search) { search-panel.focus-search(); } else { root.focus-editor(); } } }
-                IconButton { icon: @image-url("icons/wand.svg"); tooltip-text: "Formatear documento (Ctrl+Shift+F)"; enabled: root.can_format; clicked => { root.format-document(); } }
-                ToolbarSeparator {}
-
-                SegmentedControl {
-                    segments: [
-                        { icon: @image-url("icons/panel-editor.svg"), tooltip: "Solo editor", enabled: true },
-                        { icon: @image-url("icons/columns.svg"), tooltip: root.preview_available ? "Dividido" : "Dividido (no disponible para este lenguaje)", enabled: root.preview_available },
-                        { icon: @image-url("icons/eye.svg"), tooltip: root.preview_available ? "Solo vista previa" : "Solo vista previa (no disponible para este lenguaje)", enabled: root.preview_available },
-                    ];
-                    selected: root.view_mode;
-                    selected-changed(i) => { root.set-view-mode(i); }
-                }
-                IconButton { icon: @image-url("icons/globe.svg"); tooltip-text: "Abrir en navegador"; enabled: root.preview_available; clicked => { root.open-browser(); } }
-                ToolbarSeparator {}
-
-                IconButton { icon: @image-url("icons/sidebar.svg"); tooltip-text: "Explorador (Ctrl+B)"; active: root.show_explorer; clicked => { root.show_explorer = !root.show_explorer; root.settings-changed(); } }
-                IconButton { icon: @image-url("icons/wrap-text.svg"); tooltip-text: "Ajuste de línea (Alt+Z)"; active: root.word_wrap; clicked => { root.word_wrap = !root.word_wrap; root.settings-changed(); } }
-
-                Rectangle { horizontal-stretch: 1; }
-
-                IconButton { icon: @image-url("icons/settings.svg"); tooltip-text: "Configuración (Ctrl+,)"; active: root.show_settings; clicked => { root.show_settings = true; } }
-            }
+        if root.show_toolbar: Toolbar {
+            can-save: root.can_save;
+            can-save-all: root.can_save_all;
+            can-undo: root.can_undo;
+            can-redo: root.can_redo;
+            can-format: root.can_format;
+            preview-available: root.preview_available;
+            show-search: root.show_search;
+            show-settings: root.show_settings;
+            view-mode: root.view_mode;
+            show-explorer <=> root.show_explorer;
+            word-wrap <=> root.word_wrap;
+            show-line-numbers: root.show_line_numbers;
+            theme: root.theme;
+            font-size: root.font_size;
+            comment-marker: root.comment_marker;
+            can-ai: root.can_ai;
+            ai-busy: root.ai_busy;
+            ai-status: root.ai_status;
+            new-tab => { root.new-tab(); }
+            open-file => { root.open-file(); }
+            save => { root.save(); }
+            save-all => { root.save-all(); }
+            undo => { root.undo(); }
+            redo => { root.redo(); }
+            search-clicked => { root.toggle-search-panel(); if (root.show_search) { search-panel.focus-search(); } else { root.focus-editor(); } }
+            format-document => { root.format-document(); }
+            set-view-mode(i) => { root.set-view-mode(i); }
+            open-browser => { root.open-browser(); }
+            open-settings => { root.show_settings = true; }
+            settings-changed => { root.settings-changed(); }
+            toggle-theme => { root.toggle-theme(); }
+            toggle-line-numbers => { root.toggle-line-numbers(); }
+            zoom-in => { root.zoom-in(); }
+            zoom-out => { root.zoom-out(); }
+            ai-suggest-name => { root.ai-suggest-name(); }
+            ai-open-settings => { root.ai-open-settings(); }
         }
 
         // ── Pestañas ─────────────────────────────────────────────────
@@ -467,6 +522,12 @@ export component App inherits Window {
                     wrap: root.word_wrap;
                     show-line-numbers: root.show_line_numbers;
                     line-numbers-text: root.line_numbers_text;
+                    hl-spans: root.editor_hl_spans;
+                    hl-active: root.editor_hl_active;
+                    gutter-text: root.editor_gutter_text;
+                    gutter-first-row: root.editor_gutter_first_row;
+                    gutter-width-sample: root.editor_gutter_width_sample;
+                    viewport-changed => { root.editor-viewport-changed(); }
                     edited(t) => { root.text-edited(t); }
                     cursor-moved(c, a) => { root.cursor-moved(c, a); }
                     indent-requested => { root.indent-line(); }
@@ -558,6 +619,13 @@ export component App inherits Window {
         show-explorer <=> root.show_explorer;
         preview-selectable <=> root.preview_selectable;
         theme <=> root.theme;
+        syntax-highlighting <=> root.syntax_highlighting;
+        draft-auto-name <=> root.draft_auto_name;
+        draft-date-format <=> root.draft_date_format;
+        draft-date-position <=> root.draft_date_position;
+        draft-date-in-tab <=> root.draft_date_in_tab;
+        ai-enabled <=> root.ai_enabled;
+        ai-open-settings => { root.ai-open-settings(); }
         settings-changed => {
             root.settings-changed();
         }
@@ -585,5 +653,41 @@ export component App inherits Window {
         line-input <=> root.goto_line_input;
         confirm(s) => { root.goto-line(s); root.show_goto_line = false; root.focus-editor(); }
         close => { root.show_goto_line = false; root.focus-editor(); }
+    }
+
+    if root.show_ai_settings: AiSettingsDialog {
+        z: 200;
+        ai-enabled <=> root.ai_enabled;
+        provider-index <=> root.ai_provider_index;
+        provider-names: root.ai_provider_names;
+        model-names: root.ai_model_names;
+        model <=> root.ai_model;
+        base-url <=> root.ai_base_url;
+        base-url-editable: root.ai_base_url_editable;
+        needs-key: root.ai_needs_key;
+        key-stored: root.ai_key_stored;
+        key-input <=> root.ai_key_input;
+        auto-name-drafts <=> root.ai_auto_name_drafts;
+        suggest-on-save-as <=> root.ai_suggest_on_save_as;
+        name-candidates <=> root.ai_name_candidates;
+        busy: root.ai_busy;
+        status: root.ai_status;
+        settings-changed => { root.settings-changed(); }
+        provider-changed(i) => { root.ai-provider-changed(i); }
+        refresh-models => { root.ai-refresh-models(); }
+        save-key => { root.ai-save-key(); }
+        delete-key => { root.ai-delete-key(); }
+        test-connection => { root.ai-test-connection(); }
+        close => { root.show_ai_settings = false; root.settings-changed(); root.focus-editor(); }
+    }
+
+    if root.show_name_picker: NamePickerDialog {
+        z: 200;
+        suggestions: root.ai_name_suggestions;
+        choice <=> root.ai_name_choice;
+        busy: root.ai_busy;
+        picked(t) => { root.ai-name-picked(t); root.show_name_picker = false; root.focus-editor(); }
+        regenerate => { root.ai-name-regenerate(); }
+        close => { root.show_name_picker = false; root.focus-editor(); }
     }
 }

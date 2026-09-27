@@ -1,0 +1,95 @@
+import { Theme } from "../theme.slint";
+import { IconButton } from "icon_button.slint";
+import { ToolbarSeparator } from "separator.slint";
+import { SegmentedControl } from "segmented_control.slint";
+
+// Barra de herramientas principal (extraída de app.slint tal cual en la wave 0; WS-C la
+// reorganiza: grupos, iconos nuevos, desbordamiento a "⋯"). Las propiedades `in` son
+// espejo de las de `App`; las acciones salen por callbacks reenviados por `App`.
+export component Toolbar inherits Rectangle {
+    // Estado que ya usa la barra
+    in property <bool> can-save: false;
+    in property <bool> can-save-all: false;
+    in property <bool> can-undo: false;
+    in property <bool> can-redo: false;
+    in property <bool> can-format: false;
+    in property <bool> preview-available: false;
+    in property <bool> show-search: false;
+    in property <bool> show-settings: false;
+    in property <int> view-mode: 0;
+    in-out property <bool> show-explorer: false;
+    in-out property <bool> word-wrap: false;
+    // Declaradas en la wave 0 para WS-C / WS-D (aún sin usar)
+    in property <bool> show-line-numbers: true;
+    in property <int> theme: 0;
+    in property <int> font-size: 14;
+    in property <string> comment-marker: "//";
+    in property <bool> can-ai: false;
+    in property <bool> ai-busy: false;
+    in property <string> ai-status: "";
+
+    callback new-tab();
+    callback open-file();
+    callback save();
+    callback save-all();
+    callback undo();
+    callback redo();
+    // Alterna el panel de búsqueda y enfoca buscador/editor (lo resuelve App).
+    callback search-clicked();
+    callback format-document();
+    callback set-view-mode(int);
+    callback open-browser();
+    callback open-settings();
+    callback settings-changed();
+    // wave-1 fills (WS-C / WS-D)
+    callback toggle-theme();
+    callback toggle-line-numbers();
+    callback zoom-in();
+    callback zoom-out();
+    callback ai-suggest-name();
+    callback ai-open-settings();
+
+    height: Theme.toolbar-height;
+    background: Theme.sidebar-bg;
+
+    Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Theme.border; }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        spacing: 4px;
+
+        IconButton { icon: @image-url("../icons/file-plus.svg"); tooltip-text: "Nuevo (Ctrl+N)"; clicked => { root.new-tab(); } }
+        IconButton { icon: @image-url("../icons/folder-open.svg"); tooltip-text: "Abrir (Ctrl+O)"; clicked => { root.open-file(); } }
+        IconButton { icon: @image-url("../icons/save.svg"); tooltip-text: "Guardar (Ctrl+S)"; enabled: root.can-save; clicked => { root.save(); } }
+        IconButton { icon: @image-url("../icons/save-all.svg"); tooltip-text: "Guardar todo (Ctrl+Alt+S)"; enabled: root.can-save-all; clicked => { root.save-all(); } }
+        ToolbarSeparator {}
+
+        IconButton { icon: @image-url("../icons/undo.svg"); tooltip-text: "Deshacer (Ctrl+Z)"; enabled: root.can-undo; clicked => { root.undo(); } }
+        IconButton { icon: @image-url("../icons/redo.svg"); tooltip-text: "Rehacer (Ctrl+Y)"; enabled: root.can-redo; clicked => { root.redo(); } }
+        ToolbarSeparator {}
+
+        IconButton { icon: @image-url("../icons/search.svg"); tooltip-text: "Buscar (Ctrl+F)"; active: root.show-search; clicked => { root.search-clicked(); } }
+        IconButton { icon: @image-url("../icons/wand.svg"); tooltip-text: "Formatear documento (Ctrl+Shift+F)"; enabled: root.can-format; clicked => { root.format-document(); } }
+        ToolbarSeparator {}
+
+        SegmentedControl {
+            segments: [
+                { icon: @image-url("../icons/panel-editor.svg"), tooltip: "Solo editor", enabled: true },
+                { icon: @image-url("../icons/columns.svg"), tooltip: root.preview-available ? "Dividido" : "Dividido (no disponible para este lenguaje)", enabled: root.preview-available },
+                { icon: @image-url("../icons/eye.svg"), tooltip: root.preview-available ? "Solo vista previa" : "Solo vista previa (no disponible para este lenguaje)", enabled: root.preview-available },
+            ];
+            selected: root.view-mode;
+            selected-changed(i) => { root.set-view-mode(i); }
+        }
+        IconButton { icon: @image-url("../icons/globe.svg"); tooltip-text: "Abrir en navegador"; enabled: root.preview-available; clicked => { root.open-browser(); } }
+        ToolbarSeparator {}
+
+        IconButton { icon: @image-url("../icons/sidebar.svg"); tooltip-text: "Explorador (Ctrl+B)"; active: root.show-explorer; clicked => { root.show-explorer = !root.show-explorer; root.settings-changed(); } }
+        IconButton { icon: @image-url("../icons/wrap-text.svg"); tooltip-text: "Ajuste de línea (Alt+Z)"; active: root.word-wrap; clicked => { root.word-wrap = !root.word-wrap; root.settings-changed(); } }
+
+        Rectangle { horizontal-stretch: 1; }
+
+        IconButton { icon: @image-url("../icons/settings.svg"); tooltip-text: "Configuración (Ctrl+,)"; active: root.show-settings; clicked => { root.open-settings(); } }
+    }
+}

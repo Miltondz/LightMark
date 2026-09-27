@@ -26,7 +26,37 @@ pub struct Settings {
     pub recent_files: Vec<String>,
     /// R3: 0 = "Oscuro" (paleta original), 1 = "Océano" (petróleo/teal, ver ui/theme.slint).
     pub theme: u32,
+    /// Resaltado de sintaxis (overlay); desactivable.
+    pub syntax_highlighting: bool,
+    /// Nombre automático de borradores a partir del contenido.
+    pub draft_auto_name: bool,
+    /// 0 = sin fecha, 1 = dd-mm-aaaa, 2 = aaaa-mm-dd.
+    pub draft_date_format: u32,
+    /// 0 = prefijo, 1 = sufijo.
+    pub draft_date_position: u32,
+    /// Mostrar la fecha también en el título de la pestaña.
+    pub draft_date_in_tab: bool,
+    pub ai_enabled: bool,
+    /// Id del proveedor (ver `KNOWN_AI_PROVIDERS`); desconocido -> "gemini".
+    pub ai_provider: String,
+    /// Vacío = modelo barato por defecto del proveedor.
+    pub ai_model: String,
+    /// Solo para ollama/lmstudio/custom.
+    pub ai_base_url: String,
+    pub ai_auto_name_drafts: bool,
+    pub ai_suggest_on_save_as: bool,
+    /// 1..=5.
+    pub ai_name_candidates: u32,
+    /// `true` una vez que el usuario aceptó el aviso de privacidad de la IA.
+    pub ai_consent: bool,
 }
+
+/// Ids de proveedores de IA válidos (orden de `AI_PROVIDERS.md`); WS-D los alinea con
+/// `ai::providers::PROVIDERS` (hay un test que lo vigilará).
+pub const KNOWN_AI_PROVIDERS: &[&str] = &[
+    "gemini", "openrouter", "nvidia", "openai", "anthropic", "groq", "mistral", "deepseek",
+    "xai", "ollama", "lmstudio", "custom",
+];
 
 impl Default for Settings {
     fn default() -> Self {
@@ -49,6 +79,19 @@ impl Default for Settings {
             window_height: 700.0,
             recent_files: Vec::new(),
             theme: 0,
+            syntax_highlighting: true,
+            draft_auto_name: true,
+            draft_date_format: 0,
+            draft_date_position: 1,
+            draft_date_in_tab: false,
+            ai_enabled: false,
+            ai_provider: "gemini".to_string(),
+            ai_model: String::new(),
+            ai_base_url: String::new(),
+            ai_auto_name_drafts: false,
+            ai_suggest_on_save_as: true,
+            ai_name_candidates: 3,
+            ai_consent: false,
         }
     }
 }
@@ -163,6 +206,12 @@ impl Settings {
         // 0 = Oscuro, 1 = Océano; cualquier otro valor (versión futura, corrupción
         // parcial) se acota al máximo válido, igual que `view_mode` arriba.
         self.theme = self.theme.min(1);
+        self.draft_date_format = self.draft_date_format.min(2);
+        self.draft_date_position = self.draft_date_position.min(1);
+        self.ai_name_candidates = self.ai_name_candidates.clamp(1, 5);
+        if !KNOWN_AI_PROVIDERS.contains(&self.ai_provider.as_str()) {
+            self.ai_provider = "gemini".to_string();
+        }
         self
     }
 }
@@ -386,5 +435,83 @@ mod tests {
     #[test]
     fn theme_default_is_oscuro() {
         assert_eq!(Settings::default().theme, 0);
+    }
+
+    #[test]
+    fn wave0_defaults() {
+        let s = Settings::default();
+        assert!(s.syntax_highlighting);
+        assert!(s.draft_auto_name);
+        assert_eq!(s.draft_date_format, 0);
+        assert_eq!(s.draft_date_position, 1);
+        assert!(!s.draft_date_in_tab);
+        assert!(!s.ai_enabled);
+        assert_eq!(s.ai_provider, "gemini");
+        assert_eq!(s.ai_model, "");
+        assert_eq!(s.ai_base_url, "");
+        assert!(!s.ai_auto_name_drafts);
+        assert!(s.ai_suggest_on_save_as);
+        assert_eq!(s.ai_name_candidates, 3);
+        assert!(!s.ai_consent);
+    }
+
+    #[test]
+    fn old_settings_json_without_new_fields_keeps_old_and_defaults_new() {
+        let s = Settings::from_json_str_merging_defaults(r#"{"font_size": 18, "theme": 1}"#).validated();
+        assert_eq!(s.font_size, 18);
+        assert_eq!(s.theme, 1);
+        assert!(s.syntax_highlighting);
+        assert_eq!(s.ai_provider, "gemini");
+        assert_eq!(s.ai_name_candidates, 3);
+    }
+
+    #[test]
+    fn validated_clamps_new_fields() {
+        let mut s = Settings::default();
+        s.draft_date_format = 9;
+        s.draft_date_position = 5;
+        s.ai_name_candidates = 0;
+        let v = s.clone().validated();
+        assert_eq!(v.draft_date_format, 2);
+        assert_eq!(v.draft_date_position, 1);
+        assert_eq!(v.ai_name_candidates, 1);
+        s.ai_name_candidates = 99;
+        assert_eq!(s.validated().ai_name_candidates, 5);
+    }
+
+    #[test]
+    fn unknown_ai_provider_falls_back_to_gemini() {
+        let mut s = Settings::default();
+        s.ai_provider = "skynet".to_string();
+        assert_eq!(s.clone().validated().ai_provider, "gemini");
+        s.ai_provider = "ollama".to_string();
+        assert_eq!(s.validated().ai_provider, "ollama");
+    }
+
+    #[test]
+    fn wave0_fields_json_roundtrip() {
+        let mut s = Settings::default();
+        s.syntax_highlighting = false;
+        s.draft_date_format = 2;
+        s.draft_date_position = 0;
+        s.draft_date_in_tab = true;
+        s.ai_enabled = true;
+        s.ai_provider = "openrouter".to_string();
+        s.ai_model = "some/model:free".to_string();
+        s.ai_base_url = "http://localhost:11434".to_string();
+        s.ai_auto_name_drafts = true;
+        s.ai_suggest_on_save_as = false;
+        s.ai_name_candidates = 5;
+        s.ai_consent = true;
+        let json = serde_json::to_string(&s).unwrap();
+        let back = Settings::from_json_str_merging_defaults(&json).validated();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn ai_key_never_in_settings_json() {
+        let json = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(!json.to_lowercase().contains("api_key"));
+        assert!(!json.to_lowercase().contains("secret"));
     }
 }

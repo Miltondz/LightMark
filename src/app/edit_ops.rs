@@ -151,6 +151,8 @@ fn indent_unit(state: &SharedState) -> String {
 /// masivo" (`> 1`) y abría un paso de undo propio en cada pulsación, partiendo la ráfaga
 /// de tecleo normal en vez de fundirla como con un carácter ASCII.
 struct TextDiff {
+    /// Offset en bytes del primer byte cambiado (prefijo común).
+    start: usize,
     removed_len: usize,
     inserted_len: usize,
     inserted_has_newline: bool,
@@ -164,7 +166,7 @@ struct TextDiff {
 fn apply_text_diff(rope: &mut Rope, new_text: &str) -> TextDiff {
     let old_text = rope.to_string();
     if old_text == new_text {
-        return TextDiff { removed_len: 0, inserted_len: 0, inserted_has_newline: false };
+        return TextDiff { start: 0, removed_len: 0, inserted_len: 0, inserted_has_newline: false };
     }
     let (prefix, old_suffix_start, new_suffix_start) =
         crate::textops::common_prefix_suffix(&old_text, new_text);
@@ -179,6 +181,7 @@ fn apply_text_diff(rope: &mut Rope, new_text: &str) -> TextDiff {
     let removed_chars = old_text[prefix..old_suffix_start].chars().count();
     let inserted_chars = inserted.chars().count();
     TextDiff {
+        start: prefix,
         removed_len: removed_chars,
         inserted_len: inserted_chars,
         inserted_has_newline: inserted.contains('\n'),
@@ -236,11 +239,13 @@ fn on_text_edited(ui: &App, state: &SharedState, new_text: &str) {
         None
     };
     let text_for_document: &str = renormalized.as_ref().map(|(t, _)| t.as_str()).unwrap_or(new_text);
+    let mut applied: Option<(usize, usize, usize)> = None;
     {
         let mut st = state.borrow_mut();
         let ag = st.editor.active_group;
         if let Some(tab) = st.editor.groups.get_mut(ag).and_then(|g| g.active_tab_mut()) {
             let diff = apply_text_diff(&mut tab.document, text_for_document);
+            applied = Some((diff.start, diff.removed_len, diff.inserted_len));
             if let Some((_, new_cursor)) = &renormalized {
                 tab.cursor = *new_cursor;
             }
@@ -288,6 +293,10 @@ fn on_text_edited(ui: &App, state: &SharedState, new_text: &str) {
     // `Rope` todavía viejo (ver `rope_line_col`).
     update_cursor_status(ui, state);
     super::search_ops::refresh_after_text_change(ui, state);
+    // WS-A: el overlay de resaltado debe actualizarse de forma síncrona en el `edited`.
+    if let Some((start, removed, inserted)) = applied {
+        super::editor_view_ops::on_edit(ui, state, start, removed, inserted);
+    }
 }
 
 fn on_cursor_moved(ui: &App, state: &SharedState, cursor: i32, anchor: i32) {
