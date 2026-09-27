@@ -139,7 +139,10 @@ pub fn render_markdown_preview(input: &str) -> String {
     let mut result = String::new();
     let mut in_code_block = false;
     let mut current_heading_level: Option<usize> = None;
-    let mut list_index: Option<u64> = None;
+    // Pila de contadores de lista (hallazgo G/M6): cada nivel de anidamiento tiene su propio
+    // contador independiente; antes un único `Option<u64>` hacía que una lista ordenada
+    // anidada pisara y rompiera la numeración de la lista exterior.
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
     let mut in_blockquote = false;
     let mut current_link_url: Option<String> = None;
     let mut current_table: Option<TableCollector> = None;
@@ -250,28 +253,26 @@ pub fn render_markdown_preview(input: &str) -> String {
                     ));
                 }
                 Tag::List(start_num) => {
-                    list_index = start_num;
+                    list_stack.push(start_num);
                     if !result.is_empty() && !result.ends_with('\n') {
                         result.push('\n');
                     }
                 }
                 Tag::Item => {
-                    if let Some(ref mut num) = list_index {
-                        result.push_str(&format!("  {}. ", num));
+                    let depth = list_stack.len().saturating_sub(1);
+                    let indent = "  ".repeat(depth + 1);
+                    if let Some(Some(num)) = list_stack.last_mut() {
+                        result.push_str(&format!("{}{}. ", indent, num));
                         *num += 1;
                     } else {
-                        result.push_str("  • ");
+                        result.push_str(&format!("{}• ", indent));
                     }
                 }
-                Tag::Strong => {
-                    result.push_str("**");
-                }
-                Tag::Emphasis => {
-                    result.push('*');
-                }
-                Tag::Strikethrough => {
-                    result.push('~');
-                }
+                // V19: la vista previa no aplica negrita/cursiva por tramo (es un panel
+                // de líneas con un solo estilo por línea), así que dejar los marcadores
+                // `**`/`*`/`~` en el texto solo los mostraba literalmente sin dar ningún
+                // énfasis real. Se omiten: el texto queda limpio, sin marcadores.
+                Tag::Strong | Tag::Emphasis | Tag::Strikethrough => {}
                 Tag::Link { dest_url, .. } => {
                     current_link_url = Some(dest_url.to_string());
                 }
@@ -311,7 +312,7 @@ pub fn render_markdown_preview(input: &str) -> String {
                     result.push_str("└────────────────────────────────────────\n\n");
                 }
                 TagEnd::List(_) => {
-                    list_index = None;
+                    list_stack.pop();
                     if !result.ends_with('\n') {
                         result.push('\n');
                     }
@@ -321,15 +322,7 @@ pub fn render_markdown_preview(input: &str) -> String {
                         result.push('\n');
                     }
                 }
-                TagEnd::Strong => {
-                    result.push_str("**");
-                }
-                TagEnd::Emphasis => {
-                    result.push('*');
-                }
-                TagEnd::Strikethrough => {
-                    result.push('~');
-                }
+                TagEnd::Strong | TagEnd::Emphasis | TagEnd::Strikethrough => {}
                 TagEnd::Link => {
                     if let Some(url) = current_link_url.take() {
                         result.push_str(&format!(" 🔗 ({})", url));
@@ -344,18 +337,16 @@ pub fn render_markdown_preview(input: &str) -> String {
                         result.push_str(line);
                         result.push('\n');
                     }
-                } else if current_heading_level == Some(1) {
-                    result.push_str(&text.to_uppercase());
                 } else {
+                    // V19: el H1 se mostraba forzado a MAYÚSCULAS; se conserva la
+                    // capitalización original del documento.
                     result.push_str(&text);
                 }
             }
             Event::Code(code) => {
-                if in_code_block {
-                    result.push_str(&code);
-                } else {
-                    result.push_str(&format!("[{}]", code));
-                }
+                // V19: el código en línea se mostraba entre corchetes literales
+                // (`[Ctrl+S]`); se muestra el contenido tal cual, sin corchetes.
+                result.push_str(&code);
             }
             Event::TaskListMarker(checked) => {
                 if checked {
@@ -371,10 +362,10 @@ pub fn render_markdown_preview(input: &str) -> String {
                 }
             }
             Event::SoftBreak => {
-                result.push('\n');
-                if in_blockquote {
-                    result.push_str("  │ ");
-                }
+                // Un salto de línea suave (una sola línea nueva en el origen dentro del mismo
+                // párrafo) es un espacio en Markdown/CommonMark, no un salto de línea real
+                // (hallazgo M6): antes cortaba frases a media línea en la vista previa.
+                result.push(' ');
             }
             Event::HardBreak => {
                 result.push('\n');
@@ -389,12 +380,36 @@ pub fn render_markdown_preview(input: &str) -> String {
         }
     }
 
-    let trimmed = result.trim().to_string();
+    // V19: distintas combinaciones de reglas (fin de párrafo + inicio de párrafo/
+    // encabezado, ambas añadiendo su propio separador) podían encadenar 3+ saltos de
+    // línea consecutivos, viéndose como una "banda vacía" grande; se colapsa cualquier
+    // run de blancos consecutivos a una sola línea en blanco (exactamente "\n\n").
+    let collapsed = collapse_blank_lines(&result);
+    let trimmed = collapsed.trim().to_string();
     if trimmed.is_empty() {
         "(Documento vacío)".to_string()
     } else {
         trimmed
     }
+}
+
+/// Colapsa 2 o más líneas en blanco consecutivas (posiblemente con espacios) a una sola.
+fn collapse_blank_lines(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut blank_run = 0usize;
+    for line in input.split('\n') {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push('\n');
+            }
+        } else {
+            blank_run = 0;
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Render raw HTML into structured, formatted text for in-app preview
@@ -456,10 +471,10 @@ pub fn render_html_preview(input: &str) -> String {
                         result.push_str("\n────────────────────────────────────────\n\n");
                     }
                     "b" | "strong" => {
-                        result.push_str("【");
+                        result.push('【');
                     }
                     "/b" | "/strong" => {
-                        result.push_str("】");
+                        result.push('】');
                     }
                     "i" | "em" => {
                         result.push('_');
@@ -504,12 +519,44 @@ pub fn render_html_preview(input: &str) -> String {
     result.trim().to_string()
 }
 
-/// Dispatch preview rendering based on detected language
+/// Tamaño máximo (en bytes) de documento que se renderiza completo en la vista previa
+/// (hallazgo L19): más allá de esto, el árbol/eventos de `pulldown-cmark` sobre un documento de
+/// varios MB tardaba varios cientos de ms POR TECLA (la vista previa se regenera en cada
+/// edición), haciendo el editor perceptiblemente lento en documentos grandes.
+const PREVIEW_MAX_BYTES: usize = 1_000_000;
+
+/// Si `input` supera `PREVIEW_MAX_BYTES`, devuelve el primer tramo (cortado en un límite de
+/// carácter válido) junto con una nota indicando el tamaño real; si no, `input` completo y sin
+/// nota.
+fn truncate_for_preview(input: &str) -> (&str, Option<String>) {
+    if input.len() <= PREVIEW_MAX_BYTES {
+        return (input, None);
+    }
+    let mut end = PREVIEW_MAX_BYTES;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+    let total_mb = input.len() as f64 / 1_000_000.0;
+    let note = format!("(vista previa truncada: documento de {:.1} MB)", total_mb);
+    (&input[..end], Some(note))
+}
+
+/// Dispatch preview rendering based on detected language. Solo se usa el renderizador HTML
+/// cuando el lenguaje detectado es realmente `html` (hallazgo G/M6): antes, cualquier
+/// documento Markdown que empezara por `<` (p.ej. un comentario HTML embebido, o texto que
+/// simplemente empezaba con "<3" o una etiqueta suelta) se previsualizaba entero como HTML.
+/// Limita el documento renderizado a `PREVIEW_MAX_BYTES` (hallazgo L19), añadiendo una nota de
+/// truncado al final cuando corresponde; la firma pública no cambia.
 pub fn render_preview(input: &str, lang: &str) -> String {
-    if lang == "html" || (input.trim_start().starts_with('<') && input.contains('>')) {
-        render_html_preview(input)
+    let (body, note) = truncate_for_preview(input);
+    let rendered = if lang == "html" {
+        render_html_preview(body)
     } else {
-        render_markdown_preview(input)
+        render_markdown_preview(body)
+    };
+    match note {
+        Some(n) => format!("{}\n\n{}", rendered, n),
+        None => rendered,
     }
 }
 
@@ -674,5 +721,87 @@ pub fn markdown_to_plain_text(input: &str) -> String {
     }
 
     result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soft_break_becomes_space_not_hard_break() {
+        let out = render_markdown_preview("uno\ndos");
+        assert_eq!(out, "uno dos");
+    }
+
+    #[test]
+    fn emphasis_inside_list_item_is_rendered() {
+        // V19: los marcadores de énfasis (**, *) ya no se muestran literalmente en la
+        // vista previa (no aportaban ningún énfasis visual real, solo ruido).
+        let out = render_markdown_preview("- **Rust** es genial");
+        assert!(out.contains("Rust"), "salida: {}", out);
+        assert!(!out.contains("**Rust**"), "salida: {}", out);
+    }
+
+    #[test]
+    fn v19_h1_keeps_original_case_and_inline_code_has_no_brackets() {
+        let out = render_markdown_preview("# Rust\n\nUsa `Ctrl+S` para guardar.");
+        assert!(out.contains("Rust"), "salida: {}", out);
+        assert!(!out.contains("RUST"), "salida: {}", out);
+        assert!(out.contains("Ctrl+S"), "salida: {}", out);
+        assert!(!out.contains("[Ctrl+S]"), "salida: {}", out);
+    }
+
+    #[test]
+    fn v19_consecutive_blank_lines_are_collapsed() {
+        let out = render_markdown_preview("Uno\n\n\n\n\nDos");
+        assert!(!out.contains("\n\n\n"), "salida contiene banda vacía: {:?}", out);
+    }
+
+    #[test]
+    fn nested_ordered_lists_do_not_break_outer_numbering() {
+        let out = render_markdown_preview("1. uno\n   1. anidado a\n   2. anidado b\n2. dos");
+        assert!(out.contains("1. uno"), "salida: {}", out);
+        assert!(out.contains("2. dos"), "salida: {}", out);
+        assert!(out.contains("1. anidado a"), "salida: {}", out);
+        assert!(out.contains("2. anidado b"), "salida: {}", out);
+    }
+
+    #[test]
+    fn render_preview_dispatches_html_only_by_lang() {
+        // Aunque empiece por '<', si el lenguaje detectado no es "html" se trata como Markdown.
+        let md_like = "<3 esto no es HTML, es una emoticono al inicio de un párrafo";
+        let out_md = render_preview(md_like, "markdown");
+        let out_html = render_preview("<p>hola</p>", "html");
+        assert!(!out_md.is_empty());
+        assert!(out_html.contains("hola"));
+    }
+
+    #[test]
+    fn markdown_to_plain_text_handles_utf8() {
+        let out = markdown_to_plain_text("café con **t😀ext**");
+        assert!(out.contains("café"));
+        assert!(out.contains("t😀ext"));
+    }
+
+    #[test]
+    fn render_preview_truncates_large_documents_with_a_note() {
+        let para = "texto de relleno repetido varias veces. ";
+        let big = para.repeat(1_000_000 / para.len() + 10); // > 1MB
+        assert!(big.len() > super::PREVIEW_MAX_BYTES);
+        let out = render_preview(&big, "markdown");
+        assert!(
+            out.contains("vista previa truncada"),
+            "debería avisar de que se truncó: {}",
+            &out[out.len().saturating_sub(120)..]
+        );
+        // La salida no debe intentar renderizar el documento completo.
+        assert!(out.len() < big.len());
+    }
+
+    #[test]
+    fn render_preview_small_document_has_no_truncation_note() {
+        let out = render_preview("# Hola\n\nmundo", "markdown");
+        assert!(!out.contains("truncada"));
+    }
 }
 

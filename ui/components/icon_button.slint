@@ -1,0 +1,45 @@
+import { Theme } from "../theme.slint";
+
+// Botón cuadrado de barra de herramientas con icono SVG, tooltip y estados
+// hover/pressed/active/disabled.
+export component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> tooltip-text: "";
+    in property <bool> active: false;
+    in property <bool> enabled: true;
+    // Tamaño del botón/icono configurable (por defecto el de la barra de herramientas);
+    // el panel de búsqueda (V3/V4) usa botones más pequeños (24x24 / 14px).
+    in property <length> button-size: Theme.icon-button-size;
+    in property <length> icon-px-size: Theme.icon-size;
+    callback clicked();
+
+    width: root.button-size;
+    height: root.button-size;
+    border-radius: Theme.radius-small;
+    background: !root.enabled ? transparent
+        : ta.pressed ? Theme.accent-pressed
+        : (root.active ? Theme.accent-pressed : (ta.has-hover ? Theme.hover-strong : transparent));
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.selected-border;
+
+    Image {
+        source: root.icon;
+        width: root.icon-px-size;
+        height: root.icon-px-size;
+        colorize: root.enabled ? (root.active ? Theme.text-bright : Theme.icon-color) : Theme.icon-color;
+        opacity: root.enabled ? 1.0 : 0.4;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+
+    // Hallazgo U19: el tooltip debe verse también deshabilitado (es precisamente cuando
+    // más ayuda explicar por qué la acción no está disponible ahora); antes se ocultaba
+    // por completo con `root.enabled == false`.
+    if root.tooltip-text != "": Tooltip {
+        text: @markdown("\{root.tooltip-text}");
+    }
+}

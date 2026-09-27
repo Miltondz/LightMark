@@ -2,7 +2,7 @@
 ; Compile with: iscc installer.iss
 
 #define MyAppName "LightMark"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "LightMark Team"
 #define MyAppURL "https://github.com/lightmark/lightmark"
 #define MyAppExeName "lightmark.exe"

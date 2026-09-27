@@ -1,0 +1,138 @@
+import { ListView, TextEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { IconButton } from "icon_button.slint";
+
+// Estructura de una línea de la vista previa "renderizada" (con estilos ya resueltos
+// por Rust: colores, tamaños, bordes). Se mantiene igual que en la versión anterior.
+export struct PreviewLine {
+    text: string,
+    color: color,
+    bg_color: color,
+    font_size: length,
+    is_bold: bool,
+    is_mono: bool,
+    has_border_left: bool,
+    border_left_color: color,
+    has_border_bottom: bool,
+    border_bottom_color: color,
+    padding_left: length,
+    padding_top: length,
+    padding_bottom: length,
+}
+
+export component PreviewPanel inherits Rectangle {
+    in property <string> title: "VISTA PREVIA";
+    in property <string> preview-text: "";
+    in property <[PreviewLine]> preview-items;
+    in property <bool> selectable: true;
+    in property <bool> browser-available: false;
+
+    callback toggle-selectable();
+    callback copy-preview();
+    callback open-browser();
+
+    background: Theme.bg;
+
+    // V21: antes la cabecera era una banda de 33px de alto ancho completo que
+    // desplazaba el cuerpo hacia abajo, desalineando la primera línea de la vista
+    // previa respecto a la primera línea del editor (que empieza en y≈4px). Ahora la
+    // mini-barra de herramientas flota sobre el cuerpo (esquina superior derecha, sin
+    // banda de fondo que empuje el contenido) y el cuerpo ocupa todo el panel desde
+    // arriba, igual que el editor.
+    VerticalLayout {
+        spacing: 0px;
+        padding: 0px;
+
+        // Cuerpo: texto seleccionable o lista estilizada (ocupa todo el panel).
+        if root.selectable: TextEdit {
+            text: root.preview-text;
+            read-only: true;
+            font-size: Theme.font-size-large;
+            font-family: Theme.font-mono;
+            vertical-stretch: 1;
+        }
+
+        if !root.selectable: ListView {
+            vertical-stretch: 1;
+            for line in root.preview-items: Rectangle {
+                background: line.bg_color;
+                min-height: 20px;
+
+                if line.has_border_left: Rectangle {
+                    x: 0px;
+                    y: 0px;
+                    width: 3px;
+                    height: parent.height;
+                    background: line.border_left_color;
+                }
+
+                if line.has_border_bottom: Rectangle {
+                    x: 0px;
+                    y: parent.height - 1px;
+                    width: parent.width;
+                    height: 1px;
+                    background: line.border_bottom_color;
+                }
+
+                HorizontalLayout {
+                    padding-left: line.padding_left;
+                    padding-top: line.padding_top;
+                    padding-bottom: line.padding_bottom;
+                    padding-right: 8px;
+
+                    Text {
+                        text: line.text;
+                        color: line.color;
+                        font-size: line.font_size;
+                        font-weight: line.is_bold ? 700 : 400;
+                        font-family: line.is_mono ? Theme.font-mono : Theme.font-ui;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+    }
+
+    // Mini-barra flotante: esquina superior derecha, fondo translúcido, sin banda de
+    // ancho completo (ver comentario V21 arriba).
+    Rectangle {
+        x: parent.width - self.width - 6px;
+        y: 6px;
+        height: 26px;
+        width: toolbar-row.preferred-width + 8px;
+        background: Theme.dialog-bg.with-alpha(0.9);
+        border-radius: Theme.radius-normal;
+        border-width: 1px;
+        border-color: Theme.border-light;
+
+        toolbar-row := HorizontalLayout {
+            padding: 3px;
+            spacing: 2px;
+
+            IconButton {
+                icon: @image-url("../icons/text-cursor.svg");
+                tooltip-text: "Texto seleccionable";
+                button-size: 20px;
+                icon-px-size: 13px;
+                active: root.selectable;
+                clicked => { root.toggle-selectable(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/copy.svg");
+                tooltip-text: "Copiar vista previa";
+                button-size: 20px;
+                icon-px-size: 13px;
+                clicked => { root.copy-preview(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/globe.svg");
+                tooltip-text: "Abrir en navegador";
+                button-size: 20px;
+                icon-px-size: 13px;
+                enabled: root.browser-available;
+                clicked => { root.open-browser(); }
+            }
+        }
+    }
+}

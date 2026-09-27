@@ -1,0 +1,210 @@
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+
+// Editor de código/texto propio: gutter de números de línea sincronizado con el
+// scroll del TextInput, resaltado de línea actual, y funciones de edición reales
+// (cut/copy/paste/select-all/select-range) que Rust puede invocar.
+//
+// Limitación conocida de Slint 1.18: con `wrap` activo el nº de líneas visuales no
+// coincide con las líneas lógicas del texto, así que el gutter de números se oculta
+// cuando `wrap` está activo (ver PLAN.md / UI_CONTRACT.md).
+export component CodeEditor inherits Rectangle {
+    in property <string> font-family: "Consolas";
+    in property <length> font-size: 14px;
+    in property <bool> wrap: false;
+    in property <bool> show-line-numbers: true;
+    in property <string> line-numbers-text: "";
+    in property <bool> read-only: false;
+    in property <bool> interactive: true;
+    in-out property <string> text;
+
+    out property <int> cursor-byte-offset: text-input.cursor-position-byte-offset;
+    out property <int> anchor-byte-offset: text-input.anchor-position-byte-offset;
+    out property <bool> has-focus: text-input.has-focus;
+    // Posición vertical del cursor relativa al área visible (para resaltar la línea en el gutter).
+    property <length> cursor-visible-y: 0px;
+    // Hallazgo U9: antes se aproximaba con `font-size * 1.4` (un factor de interlineado
+    // arbitrario que no coincide exactamente con el alto real de línea que usa
+    // `TextInput`, así que el resaltado de línea actual y el auto-scroll iban un par de
+    // píxeles desalineados con fuentes/tamaños distintos de los probados). Se mide con
+    // un `Text` oculto de una sola línea con la misma fuente/tamaño.
+    property <length> line-height: line-height-measure.preferred-height;
+    line-height-measure := Text {
+        visible: false;
+        text: "0";
+        font-family: root.font-family;
+        font-size: root.font-size;
+    }
+
+    callback edited(string);
+    callback cursor-moved(int, int);
+    callback indent-requested();
+    callback unindent-requested();
+    callback escape-pressed();
+    callback undo-requested();
+    callback redo-requested();
+
+    // Hallazgo U20: al activar el ajuste de línea el desplazamiento horizontal previo
+    // deja de tener sentido (con `wrap` el `TextInput` ya no se desplaza en X); sin
+    // esto, el contenido podía quedar visualmente desplazado hasta el siguiente scroll.
+    changed wrap => {
+        scroll-view.content-x = 0px;
+    }
+
+    public function select-range(anchor: int, cursor: int) {
+        text-input.set-selection-offsets(anchor, cursor);
+    }
+    public function focus-editor() {
+        text-input.focus();
+    }
+    public function do-select-all() {
+        text-input.select-all();
+    }
+    public function do-cut() {
+        text-input.cut();
+    }
+    public function do-copy() {
+        text-input.copy();
+    }
+    public function do-paste() {
+        text-input.paste();
+    }
+
+    background: Theme.bg;
+
+    HorizontalLayout {
+        spacing: 0px;
+
+        if root.show-line-numbers && !root.wrap: Rectangle {
+            width: max(40px, gutter-measure.preferred-width + 20px);
+            background: Theme.bg;
+            clip: true;
+
+            // Text oculto usado solo para medir el ancho necesario del gutter
+            // (el número más largo determina el ancho; ver R1_UI U1).
+            gutter-measure := Text {
+                visible: false;
+                text: root.line-numbers-text;
+                font-family: root.font-family;
+                font-size: root.font-size;
+            }
+
+            // Resaltado de la línea actual, sincronizado con el desplazamiento del editor.
+            // +4px: mismo desfase vertical que el padding superior del TextInput (V27).
+            Rectangle {
+                y: root.cursor-visible-y + 4px;
+                x: 0px;
+                width: 100%;
+                height: root.line-height;
+                background: Theme.line-highlight;
+            }
+
+            Rectangle {
+                x: 0px;
+                y: scroll-view.content-y + 4px;
+                width: parent.width - 8px;
+                height: nums.preferred-height;
+                clip: false;
+
+                nums := Text {
+                    x: 0px;
+                    y: 0px;
+                    width: parent.width;
+                    height: self.preferred-height;
+                    text: root.line-numbers-text;
+                    font-family: root.font-family;
+                    font-size: root.font-size;
+                    color: Theme.text-disabled;
+                    horizontal-alignment: right;
+                    vertical-alignment: top;
+                }
+            }
+
+            Rectangle {
+                x: parent.width - 1px;
+                width: 1px;
+                height: 100%;
+                background: Theme.border;
+            }
+        }
+
+        scroll-view := ScrollView {
+            horizontal-stretch: 1;
+            content-width: root.wrap ? self.visible-width : max(self.visible-width, text-input.preferred-width + 16px);
+            content-height: max(self.visible-height, text-input.preferred-height + 4px);
+
+            text-input := TextInput {
+                x: 8px;
+                y: 4px;
+                width: parent.visible-width - 16px;
+                enabled: root.interactive;
+                single-line: false;
+                read-only: root.read-only;
+                wrap: root.wrap ? TextWrap.word-wrap : TextWrap.no-wrap;
+                text <=> root.text;
+                font-family: root.font-family;
+                font-size: root.font-size;
+                color: Theme.text;
+                selection-background-color: Theme.selection;
+                selection-foreground-color: Theme.text-bright;
+                page-height: scroll-view.visible-height;
+
+                edited => {
+                    root.edited(self.text);
+                }
+
+                cursor-position-changed(cpos) => {
+                    root.cursor-visible-y = cpos.y + scroll-view.content-y;
+                    root.cursor-moved(self.cursor-position-byte-offset, self.anchor-position-byte-offset);
+
+                    if (cpos.x + scroll-view.content-x < 0px) {
+                        scroll-view.content-x = min(0px, max(parent.visible-width - self.width, -cpos.x));
+                    } else if (cpos.x + scroll-view.content-x > parent.visible-width) {
+                        scroll-view.content-x = min(0px, max(parent.visible-width - self.width, parent.visible-width - cpos.x));
+                    }
+
+                    if (cpos.y + scroll-view.content-y < 0px) {
+                        scroll-view.content-y = min(
+                            0px,
+                            parent.visible-height - cpos.y - root.line-height,
+                            max(parent.visible-height - self.height, -cpos.y),
+                        );
+                    } else if (cpos.y + scroll-view.content-y > parent.visible-height - root.line-height) {
+                        scroll-view.content-y = min(0px, max(parent.visible-height - self.height, parent.visible-height - cpos.y - root.line-height));
+                    }
+                }
+
+                key-pressed(event) => {
+                    // Solo se interceptan aquí las combinaciones exactas que el editor
+                    // maneja él mismo; todo lo demás se `reject`a para que llegue sin
+                    // tocar al TextInput nativo (texto normal, AltGr/teclas muertas para
+                    // vocales acentuadas, atajos del MenuBar, etc. — ver R1_MANUAL M7).
+                    if (event.text == Key.Tab && event.modifiers.shift && !event.modifiers.control && !event.modifiers.alt) {
+                        root.unindent-requested();
+                        accept
+                    } else if (event.text == Key.Tab && !event.modifiers.control && !event.modifiers.alt) {
+                        root.indent-requested();
+                        accept
+                    } else if (event.text == Key.Escape) {
+                        root.escape-pressed();
+                        reject
+                    } else if (event.modifiers.control && !event.modifiers.alt && (event.text == "z" || event.text == "Z") && !event.modifiers.shift) {
+                        // El deshacer real vive en editor::UndoStack (Rust): se traga el
+                        // atajo aquí para que el deshacer interno del TextInput nativo no
+                        // se ejecute también (evitaba el doble-deshacer del hallazgo #1).
+                        root.undo-requested();
+                        accept
+                    } else if (event.modifiers.control && !event.modifiers.alt && (event.text == "z" || event.text == "Z") && event.modifiers.shift) {
+                        root.redo-requested();
+                        accept
+                    } else if (event.modifiers.control && !event.modifiers.alt && (event.text == "y" || event.text == "Y")) {
+                        root.redo-requested();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+            }
+        }
+    }
+}

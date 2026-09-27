@@ -1,0 +1,91 @@
+// Tema global de LightMark. `current` selecciona la paleta activa:
+//   0 = "Oscuro"  — estilo VS Code oscuro (paleta original, sin cambios).
+//   1 = "Océano"  — petróleo/teal oscuro estilo terminal Warp.
+// Todas las propiedades de color/brush se recalculan a partir de `current`, así que
+// cambiar `Theme.current` en caliente re-tematiza toda la UI sin reconstruir nada.
+export global Theme {
+    in-out property <int> current: 0;
+    property <bool> oceano: root.current == 1;
+
+    // ── Superficies ───────────────────────────────────────────────
+    // `bg`/`sidebar-bg` son `brush` (no `color`) para poder ser un degradado vertical
+    // en el tema Océano; en Oscuro son un color plano (un color es un `brush` válido,
+    // así que el resto de la UI que los usa en `background:` no cambia).
+    out property <brush> bg: root.oceano
+        ? @linear-gradient(180deg, #0c1f26 0%, #030708 100%)
+        : #1e1e1e;
+    // Explorador + barra de herramientas + barra de pestañas (Océano: petróleo algo
+    // más claro que `bg`, con su propio degradado, ligeramente más sutil).
+    out property <brush> sidebar-bg: root.oceano
+        ? @linear-gradient(180deg, #0f242b 0%, #070c0e 100%)
+        : #252526;
+    // Tarjetas de diálogo (Configuración, Atajos, Acerca de, panel de búsqueda).
+    out property <color> dialog-bg: root.oceano ? #0f2127 : #252526;
+    // Campos de entrada (LineEdit) cuando se pueden recolorear a bajo costo.
+    out property <color> bg-input: root.oceano ? #0b171b : #3c3c3c;
+    // "Keycap" de atajo de teclado (diálogo de atajos / tooltips).
+    out property <color> keycap-bg: root.oceano ? #22333a : #3c3c3c;
+    out property <color> keycap-text: root.oceano ? #cfd8dc : #ffffff;
+
+    out property <color> border: root.oceano ? #1b2e35 : #3e3e42;
+    out property <color> border-light: root.oceano ? #2a3f46 : #454545;
+    out property <color> input-border: root.oceano ? #2a3f46 : #3e3e42;
+
+    // ── Acento ────────────────────────────────────────────────────
+    out property <color> accent: root.oceano ? #3fa7b8 : #007acc;
+    out property <color> accent-hover: root.oceano ? #55b8c7 : #1177bb;
+    // Fondo de elemento activo/seleccionado (pestaña de grupo activa, segmento
+    // seleccionado, botón de icono activo...). En Océano: suave, no azul brillante.
+    out property <color> accent-pressed: root.oceano ? #24373e : #094771;
+    // Borde 1px que acompaña a `accent-pressed` en el tema Océano (en Oscuro queda
+    // transparente para no alterar el look actual, que no llevaba borde).
+    out property <color> selected-border: root.oceano ? #3e535a : transparent;
+    out property <color> focus-ring: root.oceano ? #3fa7b8 : #007acc;
+
+    // ── Texto e iconos ───────────────────────────────────────────
+    out property <color> text: root.oceano ? #e6edf0 : #cccccc;
+    out property <color> text-bright: #ffffff;
+    out property <color> text-muted: root.oceano ? #9fb0b6 : #8a8a8a;
+    out property <color> text-disabled: root.oceano ? #56676d : #5a5a5a;
+    out property <color> icon-color: root.oceano ? #c9d4d8 : #cccccc;
+    out property <color> section-label: root.oceano ? #9fb0b6 : #aaaaaa;
+
+    // ── Estados ──────────────────────────────────────────────────
+    out property <color> hover: root.oceano ? #172a31 : #2a2d2e;
+    out property <color> hover-strong: root.oceano ? #1e343b : #37373d;
+    out property <color> selection: root.oceano ? #3fa7b855 : #094771;
+    out property <color> line-highlight: root.oceano ? #ffffff12 : #2a2d2e88;
+
+    // ── Barra de estado (independiente del acento en Océano: nunca azul brillante) ──
+    out property <color> status-bar-bg: root.oceano ? #0a1a1f : #007acc;
+    out property <color> status-bar-border: root.oceano ? #1b2e35 : transparent;
+    out property <color> status-bar-text: root.oceano ? #9fb0b6 : #d0e8ff;
+
+    out property <color> success: #3dc9a0;
+    out property <color> warning: #d7ba7d;
+    out property <color> danger: #f14c4c;
+    out property <color> info: root.oceano ? #3fa7b8 : #61afef;
+
+    out property <color> overlay-dim: #000000aa;
+    out property <color> shadow: #000000cc;
+
+    // ── Tipografía ────────────────────────────────────────────────
+    out property <string> font-ui: "Segoe UI";
+    out property <string> font-mono: "Consolas";
+
+    out property <length> font-size-small: 11px;
+    out property <length> font-size-normal: 12px;
+    out property <length> font-size-large: 14px;
+    out property <length> font-size-title: 15px;
+
+    // ── Tamaños de layout ─────────────────────────────────────────
+    out property <length> menu-bar-height: 28px;
+    out property <length> toolbar-height: 30px;
+    out property <length> tab-height: 32px;
+    out property <length> status-bar-height: 22px;
+    out property <length> icon-button-size: 28px;
+    out property <length> icon-size: 16px;
+    out property <length> radius-small: 3px;
+    out property <length> radius-normal: 4px;
+    out property <length> radius-large: 6px;
+}

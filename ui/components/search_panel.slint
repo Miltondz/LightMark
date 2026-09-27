@@ -1,0 +1,187 @@
+import { LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { IconButton } from "icon_button.slint";
+
+// Panel de búsqueda/reemplazo estilo VS Code, acoplado bajo la barra de pestañas,
+// flotando sobre el editor (esquina superior derecha).
+export component SearchPanel inherits Rectangle {
+    // U7: ancho máximo disponible (normalmente el ancho de la ventana); el panel nunca
+    // debe desbordarlo, incluso en la ventana mínima de 640px. No se llama `max-width`:
+    // ese nombre es una propiedad "adjunta" reservada de `Rectangle`/layout (mismo tipo
+    // de límite que forzó renombrar `col` en `StatusBar`, ver UI_CONTRACT.md).
+    in property <length> panel-max-width: 1000px;
+    in-out property <string> search-query: "";
+    in-out property <string> replace-query: "";
+    in property <string> result-text: "Sin resultados";
+    in property <bool> case-sensitive: false;
+    in property <bool> whole-word: false;
+    in property <bool> use-regex: false;
+    in property <bool> replace-expanded: false;
+
+    callback search-changed(string);
+    callback find-next();
+    callback find-prev();
+    callback replace-one();
+    callback replace-all();
+    callback toggle-case-sensitive();
+    callback toggle-whole-word();
+    callback toggle-regex();
+    callback toggle-replace-expanded();
+    callback close();
+
+    public function focus-search() {
+        search-input.focus();
+    }
+
+    // V3: el panel necesita ~470px para no recortar controles; antes 340px desbordaba.
+    width: min(470px, root.panel-max-width - 24px);
+    height: root.replace-expanded ? 84px : 44px;
+    background: Theme.dialog-bg;
+    border-width: 1px;
+    border-color: Theme.border-light;
+    border-radius: Theme.radius-normal;
+    drop-shadow-blur: 12px;
+    drop-shadow-color: Theme.shadow;
+
+    VerticalLayout {
+        padding: 6px;
+        spacing: 4px;
+
+        HorizontalLayout {
+            spacing: 4px;
+            height: 32px;
+
+            // V4: chevron a la izquierda del panel para mostrar/ocultar reemplazo
+            // (patrón VS Code), en vez de un icono de "reemplazar" que parecía
+            // "maximizar".
+            IconButton {
+                icon: root.replace-expanded ? @image-url("../icons/chevron-down.svg") : @image-url("../icons/chevron-right.svg");
+                tooltip-text: "Mostrar/ocultar reemplazo";
+                button-size: 24px;
+                icon-px-size: 14px;
+                active: root.replace-expanded;
+                clicked => { root.toggle-replace-expanded(); }
+            }
+
+            search-input := LineEdit {
+                horizontal-stretch: 1;
+                min-width: 120px;
+                text <=> root.search-query;
+                placeholder-text: "Buscar";
+                edited(t) => { root.search-changed(t); }
+                accepted(t) => { root.find-next(); }
+                // U11: Esc cierra el panel (el LineEdit nativo se comía la tecla y
+                // nunca llegaba al `key-pressed` de más arriba); Shift+Enter busca
+                // hacia atrás en vez de repetir "siguiente".
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.close();
+                        accept
+                    } else if (event.text == Key.Return && event.modifiers.shift) {
+                        root.find-prev();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+            }
+
+            IconButton {
+                icon: @image-url("../icons/case-sensitive.svg");
+                tooltip-text: "Distinguir mayúsculas";
+                button-size: 24px;
+                icon-px-size: 14px;
+                active: root.case-sensitive;
+                clicked => { root.toggle-case-sensitive(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/whole-word.svg");
+                tooltip-text: "Palabra completa";
+                button-size: 24px;
+                icon-px-size: 14px;
+                active: root.whole-word;
+                clicked => { root.toggle-whole-word(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/regex.svg");
+                tooltip-text: "Expresión regular";
+                button-size: 24px;
+                icon-px-size: 14px;
+                active: root.use-regex;
+                clicked => { root.toggle-regex(); }
+            }
+
+            Text {
+                text: root.result-text;
+                font-size: Theme.font-size-small;
+                color: Theme.text-muted;
+                vertical-alignment: center;
+                min-width: 56px;
+                horizontal-alignment: right;
+            }
+
+            IconButton {
+                icon: @image-url("../icons/chevron-up.svg");
+                tooltip-text: "Anterior (Shift+F3)";
+                button-size: 24px;
+                icon-px-size: 14px;
+                clicked => { root.find-prev(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/chevron-down.svg");
+                tooltip-text: "Siguiente (F3)";
+                button-size: 24px;
+                icon-px-size: 14px;
+                clicked => { root.find-next(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/x.svg");
+                tooltip-text: "Cerrar (Esc)";
+                button-size: 24px;
+                icon-px-size: 14px;
+                clicked => { root.close(); }
+            }
+        }
+
+        if root.replace-expanded: HorizontalLayout {
+            spacing: 4px;
+            height: 32px;
+
+            Rectangle { width: 24px; }
+
+            LineEdit {
+                horizontal-stretch: 1;
+                min-width: 120px;
+                text <=> root.replace-query;
+                placeholder-text: "Reemplazar";
+                accepted => { root.replace-one(); }
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) {
+                        root.close();
+                        accept
+                    } else if (event.text == Key.Return && event.modifiers.shift) {
+                        root.find-prev();
+                        accept
+                    } else {
+                        reject
+                    }
+                }
+            }
+
+            IconButton {
+                icon: @image-url("../icons/replace.svg");
+                tooltip-text: "Reemplazar";
+                button-size: 24px;
+                icon-px-size: 14px;
+                clicked => { root.replace-one(); }
+            }
+            IconButton {
+                icon: @image-url("../icons/replace-all.svg");
+                tooltip-text: "Reemplazar todo";
+                button-size: 24px;
+                icon-px-size: 14px;
+                clicked => { root.replace-all(); }
+            }
+        }
+    }
+}

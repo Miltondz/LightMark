@@ -1,163 +1,11 @@
+// El wiring actual solo usa `list_directory`, `atomic_save` y `has_external_changes`; el
+// resto (helpers de tipo de archivo, tamaño, codificación, recorrido de proyecto) queda
+// disponible para el explorador de proyectos completo que no forma parte de este pase.
 #![allow(dead_code)]
 
 use ropey::Rope;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-
-#[derive(Clone, Debug)]
-pub struct SearchResult {
-    pub start: usize,
-    pub end: usize,
-    pub line: usize,
-    pub column: usize,
-    pub text: String,
-}
-
-#[derive(Clone, Copy)]
-pub struct SearchOptions {
-    pub case_sensitive: bool,
-    pub whole_word: bool,
-    pub use_regex: bool,
-    pub wrap: bool,
-}
-
-impl Default for SearchOptions {
-    fn default() -> Self {
-        Self {
-            case_sensitive: false,
-            whole_word: false,
-            use_regex: false,
-            wrap: true,
-        }
-    }
-}
-
-pub fn search_in_rope(rope: &Rope, query: &str, options: SearchOptions) -> Vec<SearchResult> {
-    if query.is_empty() {
-        return Vec::new();
-    }
-
-    let full_text = rope.to_string();
-    let lower_text = if !options.case_sensitive {
-        Some(full_text.to_lowercase())
-    } else {
-        None
-    };
-
-    let search_text = lower_text.as_deref().unwrap_or(&full_text);
-
-    let escaped_query = if options.use_regex {
-        query.to_string()
-    } else {
-        regex::escape(query)
-    };
-
-    let pattern = if options.whole_word {
-        format!(r"\b{}\b", escaped_query)
-    } else {
-        escaped_query
-    };
-
-    let regex_opts = if options.case_sensitive {
-        regex::RegexBuilder::new(&pattern).build()
-    } else {
-        regex::RegexBuilder::new(&pattern)
-            .case_insensitive(true)
-            .build()
-    };
-
-    let re = match regex_opts {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut results = Vec::new();
-    let mut byte_offset = 0usize;
-
-    for mat in re.find_iter(search_text) {
-        let actual_start = if options.case_sensitive {
-            mat.start()
-        } else {
-            byte_offset + mat.start()
-        };
-
-        let actual_end = actual_start + (mat.end() - mat.start());
-
-        let prefix = &full_text[..actual_start];
-        let line = prefix.chars().filter(|&c| c == '\n').count();
-        let last_newline = prefix.rfind('\n');
-        let column = match last_newline {
-            Some(pos) => actual_start - pos - 1,
-            None => actual_start,
-        };
-
-        let matched_text: String = full_text[actual_start..actual_end].to_string();
-
-        results.push(SearchResult {
-            start: actual_start,
-            end: actual_end,
-            line,
-            column,
-            text: matched_text,
-        });
-
-        byte_offset = actual_end;
-    }
-
-    results
-}
-
-pub fn replace_in_rope(
-    rope: &mut Rope,
-    results: &[SearchResult],
-    replacement: &str,
-    replace_all: bool,
-) -> usize {
-    if results.is_empty() {
-        return 0;
-    }
-
-    if replace_all {
-        for result in results.iter().rev() {
-            rope.remove(result.start..result.end);
-            rope.insert(result.start, replacement);
-        }
-        results.len()
-    } else if !results.is_empty() {
-        let first = &results[0];
-        rope.remove(first.start..first.end);
-        rope.insert(first.start, replacement);
-        1
-    } else {
-        0
-    }
-}
-
-pub fn find_next(results: &[SearchResult], current_pos: usize, wrap: bool) -> Option<usize> {
-    for (i, result) in results.iter().enumerate() {
-        if result.start > current_pos {
-            return Some(i);
-        }
-    }
-    if wrap {
-        results.first().map(|_| 0)
-    } else {
-        None
-    }
-}
-
-pub fn find_prev(results: &[SearchResult], current_pos: usize, wrap: bool) -> Option<usize> {
-    for (i, result) in results.iter().enumerate().rev() {
-        if result.start < current_pos {
-            return Some(i);
-        }
-    }
-    if wrap {
-        results.last().map(|_| results.len() - 1)
-    } else {
-        None
-    }
-}
 
 // Workspace file system operations
 
@@ -170,6 +18,8 @@ pub struct FileInfo {
     pub modified: SystemTime,
 }
 
+/// Lista el contenido de `dir`: carpetas primero, luego archivos, ambos en orden alfabético
+/// sin distinguir mayúsculas/minúsculas. Oculta los archivos/carpetas que empiezan por `.`.
 pub fn list_directory(dir: &Path) -> std::io::Result<Vec<FileInfo>> {
     let mut entries: Vec<FileInfo> = Vec::new();
 
@@ -177,24 +27,29 @@ pub fn list_directory(dir: &Path) -> std::io::Result<Vec<FileInfo>> {
         let entry = entry?;
         let path = entry.path();
         let metadata = entry.metadata()?;
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        if name.starts_with('.') {
+            continue;
+        }
 
         entries.push(FileInfo {
             path: path.clone(),
-            name: path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default(),
+            name,
             is_dir: metadata.is_dir(),
             size: metadata.len(),
             modified: metadata.modified()?,
         });
     }
 
-    // Sort: directories first, then files, alphabetically
+    // Orden: carpetas primero, luego archivos; alfabético, sin distinguir mayúsculas.
     entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
         (true, false) => std::cmp::Ordering::Less,
         (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.cmp(&b.name),
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
 
     Ok(entries)
@@ -259,23 +114,183 @@ pub fn is_huge_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-// Atomic save: write to temp, flush, then rename
+// Atomic save: write to temp, flush, then rename. Si cualquier paso falla, el `.tmp` se borra
+// (hallazgo C4): nunca debe quedar un archivo temporal huérfano en el directorio del usuario.
+//
+// Hallazgo L18 — casos adicionales cubiertos:
+// - Symlink: escribe/renombra sobre el DESTINO real (`canonicalize`) en vez de sustituir el
+//   propio enlace por un archivo normal (lo que rompería el symlink).
+// - Permisos existentes (p.ej. solo lectura): se reaplican tras el `rename`, ya que un
+//   `rename` sobre Windows conserva los del `.tmp` (recién creado, sin el atributo), no los
+//   del archivo reemplazado.
+// - `rename` puede fallar si el archivo destino está abierto por otro proceso sin
+//   `FILE_SHARE_DELETE` (frecuente en Windows). En ese caso se hace un fallback: copia de
+//   seguridad (`.bak`) del contenido anterior + truncar y escribir el archivo EN SITIO (que sí
+//   suele estar permitido si el otro proceso comparte al menos escritura).
+// - El atributo "oculto" de Windows NO se preserva: no hay forma de leerlo/reaplicarlo con
+//   `std` sin llamar a la API Win32 directamente (y se decidió no invocar `attrib` por
+//   `Command`); queda documentado como limitación conocida.
 pub fn atomic_save(path: &Path, content: &str) -> std::io::Result<()> {
+    atomic_save_impl(path, content, ReadonlyPolicy::ClearAndRestore)
+}
+
+/// Como `atomic_save`, pero para archivos que el USUARIO tiene abiertos y está editando
+/// (hallazgo C7): "Guardar"/"Guardar como" sobre un archivo marcado de solo lectura NO
+/// debe limpiar esa marca y sobrescribirlo en silencio — eso es una decisión del usuario
+/// (o de otra herramienta) que el editor debe respetar, igual que cualquier otro editor
+/// de texto. Devuelve `Err` con `ErrorKind::PermissionDenied` para que la UI lo muestre en
+/// la barra de estado en vez de perder el archivo de solo lectura sin avisar.
+///
+/// `atomic_save` (sin el guard de solo lectura) sigue siendo el correcto para archivos
+/// INTERNOS de la app (settings.json, session.json, scratch-index.json, borradores de
+/// scratch): esos son datos propios de LightMark, no algo que el usuario haya marcado
+/// deliberadamente como protegido, así que autoguardarlos puede seguir limpiando la marca.
+pub fn atomic_save_document(path: &Path, content: &str) -> std::io::Result<()> {
+    atomic_save_impl(path, content, ReadonlyPolicy::Reject)
+}
+
+enum ReadonlyPolicy {
+    /// Limpia la marca de solo lectura para poder escribir, y la restaura al terminar
+    /// (éxito o error) — comportamiento histórico, reservado a archivos internos de la
+    /// app.
+    ClearAndRestore,
+    /// No toca el archivo: si está marcado de solo lectura, falla con
+    /// `PermissionDenied` antes de intentar escribir nada.
+    Reject,
+}
+
+fn atomic_save_impl(path: &Path, content: &str, policy: ReadonlyPolicy) -> std::io::Result<()> {
     use std::io::Write;
 
-    let temp_path = path.with_extension(format!(
-        "{}.tmp",
-        path.extension().and_then(|e| e.to_str()).unwrap_or("tmp")
-    ));
+    // Si `path` es un symlink, opera sobre su destino real para no romper el enlace
+    // sustituyéndolo por un archivo normal.
+    let target: std::path::PathBuf = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+        }
+        _ => path.to_path_buf(),
+    };
 
-    // Write to temp file
-    let mut file = std::fs::File::create(&temp_path)?;
-    file.write_all(content.as_bytes())?;
-    file.sync_all()?;
+    let existing_permissions = std::fs::metadata(&target).ok().map(|m| m.permissions());
 
-    // Atomic replace
-    std::fs::rename(&temp_path, path)?;
-    Ok(())
+    if let Some(perms) = &existing_permissions {
+        if perms.readonly() {
+            match policy {
+                ReadonlyPolicy::Reject => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "El archivo es de solo lectura",
+                    ));
+                }
+                ReadonlyPolicy::ClearAndRestore => {
+                    // Un archivo de solo lectura no se puede sustituir con `rename`
+                    // (falla con acceso denegado) ni reescribir directamente; se quita
+                    // la marca antes de escribir y se restaura al final sobre el
+                    // resultado final, sea cual sea la ruta tomada (ver más abajo).
+                    let mut writable = perms.clone();
+                    writable.set_readonly(false);
+                    std::fs::set_permissions(&target, writable).ok();
+                }
+            }
+        }
+    }
+
+    let result = (|| -> std::io::Result<()> {
+        // Hallazgo C8: nombre de temporal ÚNICO abierto con `create_new(true)`, no
+        // `File::create` (que TRUNCA silenciosamente cualquier archivo existente con ese
+        // nombre exacto). Con el nombre fijo `<archivo>.<ext>.tmp` de antes, si el
+        // usuario ya tenía un archivo propio llamado justo así (nada exótico: es un
+        // nombre predecible), guardar lo destruía sin avisar.
+        let (temp_path, mut temp_file) = create_unique_temp_file(&target)?;
+
+        let write_result = (|| -> std::io::Result<()> {
+            temp_file.write_all(content.as_bytes())?;
+            temp_file.sync_all()?;
+            Ok(())
+        })();
+
+        if let Err(e) = write_result {
+            std::fs::remove_file(&temp_path).ok();
+            return Err(e);
+        }
+
+        match std::fs::rename(&temp_path, &target) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                // El rename falló (típicamente: el destino está abierto por otro proceso sin
+                // FILE_SHARE_DELETE en Windows). Se limpia el .tmp y se intenta escribir EN
+                // SITIO: si el otro proceso al menos comparte escritura, esto sí tendrá éxito;
+                // si no, se propaga el error de esa escritura in situ (más informativo que el
+                // del rename).
+                std::fs::remove_file(&temp_path).ok();
+                if target.exists() {
+                    std::fs::copy(&target, backup_path_for(&target)).ok();
+                }
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&target)?;
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+                // Hallazgo C8: el `.bak` de respaldo del contenido anterior solo existe
+                // para permitir recuperarlo si la escritura EN SITIO fallaba a mitad; una
+                // vez la escritura in situ tuvo éxito, el archivo original ya está
+                // reemplazado y el `.bak` sobrante no debe quedar huérfano pisando el
+                // espacio de nombres del usuario (ni, peor, un archivo que el usuario
+                // hubiera creado él mismo con ese nombre).
+                std::fs::remove_file(backup_path_for(&target)).ok();
+                Ok(())
+            }
+        }
+    })();
+
+    // Hallazgo C7: restaurar los permisos originales SIEMPRE al salir (éxito O error) —
+    // antes solo se restauraban en la rama de éxito del `rename` y en la rama de
+    // fallback in situ tras un `rename` fallido; si la escritura del `.tmp` fallaba
+    // (disco lleno, etc.) la marca de solo lectura quedaba limpiada permanentemente.
+    if let Some(perms) = existing_permissions {
+        std::fs::set_permissions(&target, perms).ok();
+    }
+
+    result
+}
+
+/// Crea y devuelve un archivo temporal con nombre ÚNICO junto a `target` (hallazgo C8),
+/// abierto con `create_new(true)`: si por lo que sea el nombre elegido YA existe, falla
+/// con `AlreadyExists` en vez de truncarlo (nunca pisa un archivo que no creó esta misma
+/// llamada). Reintenta unas pocas veces con un sufijo distinto ante esa colisión —
+/// extremadamente improbable dado que mezcla el PID y un contador de nanosegundos, pero
+/// más seguro que asumirlo.
+fn create_unique_temp_file(target: &Path) -> std::io::Result<(std::path::PathBuf, std::fs::File)> {
+    let ext = target.extension().and_then(|e| e.to_str()).unwrap_or("tmp");
+    let pid = std::process::id();
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 0u32..8 {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let candidate = target.with_extension(format!("{ext}.{pid}-{nanos}-{attempt}.tmp"));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                last_err = Some(e);
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::AlreadyExists, "no se pudo crear un archivo temporal único")
+    }))
+}
+
+fn backup_path_for(target: &Path) -> std::path::PathBuf {
+    target.with_extension(format!(
+        "{}.bak",
+        target.extension().and_then(|e| e.to_str()).unwrap_or("bak")
+    ))
 }
 
 // Check if file has been modified externally since last check
@@ -308,7 +323,11 @@ pub fn get_encoding_info(path: &Path) -> (String, String) {
 
         // Detect line endings
         let sample = std::str::from_utf8(&content).unwrap_or("");
-        let sample_truncated = &sample[..sample.len().min(8192)];
+        let mut cut = sample.len().min(8192);
+        while cut > 0 && !sample.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let sample_truncated = &sample[..cut];
         if sample_truncated.contains("\r\n") {
             line_endings = "CRLF".to_string();
         } else if sample_truncated.contains('\r') {
@@ -360,4 +379,212 @@ pub fn get_relative_path(root: &Path, file: &Path) -> Option<String> {
 pub fn time_since_modified(path: &Path) -> Option<Duration> {
     let modified = file_modified_time(path)?;
     modified.elapsed().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-workspace-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn list_directory_orders_dirs_first_then_alphabetical_case_insensitive() {
+        let dir = temp_dir("order");
+        std::fs::create_dir_all(dir.join("Zebra")).unwrap();
+        std::fs::create_dir_all(dir.join("apple_dir")).unwrap();
+        std::fs::write(dir.join("banana.txt"), "b").unwrap();
+        std::fs::write(dir.join("Apple.txt"), "a").unwrap();
+        std::fs::write(dir.join(".hidden"), "h").unwrap();
+
+        let entries = list_directory(&dir).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+
+        assert_eq!(names, vec!["apple_dir", "Zebra", "Apple.txt", "banana.txt"]);
+        assert!(entries[0].is_dir && entries[1].is_dir);
+        assert!(!entries[2].is_dir && !entries[3].is_dir);
+        assert!(!names.iter().any(|n| n.starts_with('.')));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_save_writes_content() {
+        let dir = temp_dir("atomic");
+        let file = dir.join("doc.txt");
+        atomic_save(&file, "hola mundo").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hola mundo");
+        // No debe quedar el temporal
+        assert!(!dir.join("doc.txt.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_save_does_not_leave_tmp_on_failure() {
+        let dir = temp_dir("atomic-fail");
+        // Ruta con un directorio padre inexistente -> falla en el paso de rename/create.
+        let bad_path = dir.join("no-existe-dir").join("doc.txt");
+        assert!(atomic_save(&bad_path, "x").is_err());
+        let tmp_path = bad_path.with_extension("txt.tmp");
+        assert!(!tmp_path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_save_overwrites_existing_content() {
+        let dir = temp_dir("atomic-overwrite");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "old").unwrap();
+        atomic_save(&file, "new content").unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new content");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn atomic_save_preserves_readonly_permission() {
+        let dir = temp_dir("atomic-readonly");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "old").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        atomic_save(&file, "new content").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new content");
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        // Deja el archivo escribible para poder limpiar el directorio temporal.
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn c7_atomic_save_document_rejects_readonly_without_overwriting() {
+        // Hallazgo C7: `atomic_save_document` (usado por Guardar/Guardar como sobre
+        // archivos del usuario) NO debe limpiar la marca de solo lectura ni sobrescribir
+        // el archivo — debe fallar con PermissionDenied y dejar el contenido intacto.
+        let dir = temp_dir("c7-readonly-doc");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "contenido original").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let err = atomic_save_document(&file, "contenido nuevo").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "contenido original");
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn c7_atomic_save_internal_still_clears_and_restores_readonly() {
+        // `atomic_save` (archivos internos de la app) conserva el comportamiento
+        // histórico: limpia la marca para poder escribir y la restaura al terminar.
+        let dir = temp_dir("c7-readonly-internal");
+        let file = dir.join("settings.json");
+        std::fs::write(&file, "{}").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        atomic_save(&file, r#"{"x":1}"#).unwrap();
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), r#"{"x":1}"#);
+        assert!(std::fs::metadata(&file).unwrap().permissions().readonly());
+
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).ok();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn c8_atomic_save_never_truncates_a_preexisting_file_that_collides_with_temp_name() {
+        // Hallazgo C8: el nombre de temporal ya NO es el fijo predecible
+        // "<archivo>.<ext>.tmp" — si el usuario tenía un archivo real con ESE nombre
+        // exacto, `File::create` lo truncaba sin avisar. Se comprueba que ese archivo
+        // sobrevive intacto tras guardar.
+        let dir = temp_dir("c8-collision");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "contenido").unwrap();
+        let colliding_tmp = dir.join("doc.txt.tmp"); // nombre fijo que se usaba antes.
+        std::fs::write(&colliding_tmp, "NO ME TOQUES").unwrap();
+
+        atomic_save(&file, "contenido nuevo").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "contenido nuevo");
+        assert_eq!(std::fs::read_to_string(&colliding_tmp).unwrap(), "NO ME TOQUES");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn c8_no_backup_left_after_normal_successful_save() {
+        let dir = temp_dir("c8-bak-cleanup");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "old").unwrap();
+        atomic_save(&file, "new").unwrap();
+        let bak = backup_path_for(&file);
+        assert!(!bak.exists(), "no debe quedar un .bak tras un guardado normal");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn c8_backup_removed_after_successful_fallback_when_rename_is_blocked() {
+        // Hallazgo C8: cuando el `rename` atómico falla (aquí, forzado manteniendo el
+        // destino abierto sin `FILE_SHARE_DELETE` — el comportamiento por defecto de
+        // `std::fs::File` en Windows, que hace que `MoveFileExW` falle con una
+        // violación de uso compartido) y se recurre al fallback de escritura EN SITIO,
+        // el `.bak` de seguridad solo debe existir mientras esa escritura está en
+        // curso; una vez tiene éxito, no debe quedar huérfano.
+        let dir = temp_dir("c8-bak-fallback");
+        let file = dir.join("doc.txt");
+        std::fs::write(&file, "old").unwrap();
+        let keep_open = std::fs::OpenOptions::new().read(true).open(&file).unwrap();
+
+        atomic_save(&file, "new").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "new");
+        let bak = backup_path_for(&file);
+        assert!(!bak.exists(), "el .bak de respaldo no debe quedar tras el fallback exitoso");
+        drop(keep_open);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn atomic_save_through_symlink_writes_real_target_and_keeps_link() {
+        let dir = temp_dir("atomic-symlink");
+        let target = dir.join("real.txt");
+        std::fs::write(&target, "real").unwrap();
+        let link = dir.join("link.txt");
+
+        // Crear symlinks en Windows puede requerir un privilegio que no siempre está
+        // disponible en el entorno de compilación/CI; si falla, no es un fallo de esta
+        // función y se omite el resto de la comprobación (igual que hace el sondeo r2).
+        if std::os::windows::fs::symlink_file(&target, &link).is_ok() {
+            atomic_save(&link, "via link").unwrap();
+            assert_eq!(std::fs::read_to_string(&target).unwrap(), "via link");
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
