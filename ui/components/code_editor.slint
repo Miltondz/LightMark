@@ -5,9 +5,8 @@ import { Theme } from "../theme.slint";
 // scroll del TextInput, resaltado de línea actual, y funciones de edición reales
 // (cut/copy/paste/select-all/select-range) que Rust puede invocar.
 //
-// Limitación conocida de Slint 1.18: con `wrap` activo el nº de líneas visuales no
-// coincide con las líneas lógicas del texto, así que el gutter de números se oculta
-// cuando `wrap` está activo (ver PLAN.md / UI_CONTRACT.md).
+// Gutter estilo Sublime: `gutter-text` lo genera Rust con una entrada por fila VISUAL
+// (número solo en la primera fila de cada línea lógica, vacío en las de continuación).
 // Fragmento de texto coloreado del overlay de resaltado (WS-A): x/y relativos al origen
 // del TextInput (coordenadas de contenido).
 export struct EditorSpan {
@@ -55,18 +54,24 @@ export component CodeEditor inherits Rectangle {
     out property <bool> has-focus: text-input.has-focus;
     // Posición vertical del cursor relativa al área visible (para resaltar la línea en el gutter).
     property <length> cursor-visible-y: 0px;
-    // Hallazgo U9: antes se aproximaba con `font-size * 1.4` (un factor de interlineado
-    // arbitrario que no coincide exactamente con el alto real de línea que usa
-    // `TextInput`, así que el resaltado de línea actual y el auto-scroll iban un par de
-    // píxeles desalineados con fuentes/tamaños distintos de los probados). Se mide con
-    // un `Text` oculto de una sola línea con la misma fuente/tamaño.
-    out property <length> line-height: line-height-measure.preferred-height;
-    line-height-measure := Text {
+    // Alto de línea exacto: un `Text` de 1 línea redondea (17.57 -> 18) y acumula deriva
+    // por fila; se mide sobre 100 líneas y se divide (también corrige el resaltado de línea).
+    out property <length> line-height: lh-measurer.preferred-height / 100;
+    lh-measurer := Text {
         visible: false;
-        text: "0";
+        text: "0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0\n0";
         font-family: root.font-family;
         font-size: root.font-size;
     }
+    property <int> scroll-x-bucket: Math.floor(root.scroll-x / 64px);
+    changed first-visible-row => { root.viewport-changed(); }
+    changed visible-rows => { root.viewport-changed(); }
+    changed scroll-x-bucket => { root.viewport-changed(); }
+    changed wrap-width => { root.viewport-changed(); }
+    changed view-width => { root.viewport-changed(); }
+    changed font-size => { root.viewport-changed(); }
+    changed font-family => { root.viewport-changed(); }
+    changed line-height => { root.viewport-changed(); }
 
     callback edited(string);
     callback cursor-moved(int, int);
@@ -81,6 +86,7 @@ export component CodeEditor inherits Rectangle {
     // esto, el contenido podía quedar visualmente desplazado hasta el siguiente scroll.
     changed wrap => {
         scroll-view.content-x = 0px;
+        root.viewport-changed();
     }
 
     public function select-range(anchor: int, cursor: int) {
@@ -107,7 +113,7 @@ export component CodeEditor inherits Rectangle {
     HorizontalLayout {
         spacing: 0px;
 
-        if root.show-line-numbers && !root.wrap: Rectangle {
+        if root.show-line-numbers: Rectangle {
             width: max(40px, gutter-measure.preferred-width + 20px);
             background: Theme.bg;
             clip: true;
@@ -116,7 +122,7 @@ export component CodeEditor inherits Rectangle {
             // (el número más largo determina el ancho; ver R1_UI U1).
             gutter-measure := Text {
                 visible: false;
-                text: root.line-numbers-text;
+                text: root.gutter-width-sample;
                 font-family: root.font-family;
                 font-size: root.font-size;
             }
@@ -133,7 +139,7 @@ export component CodeEditor inherits Rectangle {
 
             Rectangle {
                 x: 0px;
-                y: scroll-view.content-y + 4px;
+                y: scroll-view.content-y + 4px + root.gutter-first-row * root.line-height;
                 width: parent.width - 8px;
                 height: nums.preferred-height;
                 clip: false;
@@ -143,7 +149,7 @@ export component CodeEditor inherits Rectangle {
                     y: 0px;
                     width: parent.width;
                     height: self.preferred-height;
-                    text: root.line-numbers-text;
+                    text: root.gutter-text;
                     font-family: root.font-family;
                     font-size: root.font-size;
                     color: Theme.text-disabled;
@@ -165,6 +171,17 @@ export component CodeEditor inherits Rectangle {
             content-width: root.wrap ? self.visible-width : max(self.visible-width, text-input.preferred-width + 16px);
             content-height: max(self.visible-height, text-input.preferred-height + 4px);
 
+            // Overlay de resaltado: detrás del TextInput (color transparente); posiciones
+            // calculadas en Rust (editor_view.rs / editor_view_ops.rs).
+            for s in root.hl-spans: Text {
+                x: 8px + s.x;
+                y: 4px + s.y;
+                text: s.text;
+                color: s.color;
+                font-family: root.font-family;
+                font-size: root.font-size;
+            }
+
             text-input := TextInput {
                 x: 8px;
                 y: 4px;
@@ -176,7 +193,7 @@ export component CodeEditor inherits Rectangle {
                 text <=> root.text;
                 font-family: root.font-family;
                 font-size: root.font-size;
-                color: Theme.text;
+                color: root.hl-active && self.preedit-text == "" ? transparent : Theme.text;
                 selection-background-color: Theme.selection;
                 selection-foreground-color: Theme.text-bright;
                 page-height: scroll-view.visible-height;
