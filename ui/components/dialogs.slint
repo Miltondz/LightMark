@@ -1,0 +1,382 @@
+import { Button, ComboBox, SpinBox, Switch, ScrollView, LineEdit } from "std-widgets.slint";
+import { Theme } from "../theme.slint";
+import { IconButton } from "icon_button.slint";
+
+// Fondo atenuado + tarjeta centrada reutilizable para todos los diálogos modales.
+// Inherita de FocusScope (no de Rectangle) para poder recibir `key-pressed` y
+// cerrar con Escape.
+component ModalShell inherits FocusScope {
+    in property <length> card-width: 480px;
+    in property <length> card-height: 360px;
+    in property <string> dialog-title: "";
+    callback close();
+
+    x: 0px; y: 0px;
+    width: 100%; height: 100%;
+
+    init => { root.focus(); }
+
+    TouchArea {
+        width: 100%; height: 100%;
+        clicked => { root.close(); }
+        // Hallazgo U21: sin esto, girar la rueda del ratón sobre el fondo atenuado del
+        // diálogo llegaba al editor/explorador de detrás (el overlay no consume el
+        // evento de scroll por defecto) y se veía moverse "a través" del modal.
+        scroll-event(e) => {
+            accept
+        }
+    }
+    Rectangle { background: Theme.overlay-dim; }
+
+    // U8: la tarjeta no debe desbordar la ventana mínima (640x400) ni cualquier tamaño
+    // menor que el card-width/height "ideal" del diálogo; se acota al tamaño disponible
+    // menos un margen de 16px por lado.
+    property <length> effective-width: min(root.card-width, root.width - 32px);
+    property <length> effective-height: min(root.card-height, root.height - 32px);
+
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.effective-width;
+        height: root.effective-height;
+        background: Theme.dialog-bg;
+        border-width: 1px;
+        border-color: Theme.border-light;
+        border-radius: Theme.radius-large;
+        drop-shadow-blur: 20px;
+        drop-shadow-color: Theme.shadow;
+
+        // Absorbe clics para no cerrar el diálogo al interactuar con la tarjeta.
+        TouchArea { width: 100%; height: 100%; }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            HorizontalLayout {
+                height: 26px;
+                Text {
+                    text: root.dialog-title;
+                    font-size: Theme.font-size-title;
+                    font-weight: 700;
+                    color: Theme.text-bright;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                }
+                IconButton {
+                    icon: @image-url("../icons/x.svg");
+                    tooltip-text: "Cerrar (Esc)";
+                    clicked => { root.close(); }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            @children
+        }
+    }
+
+    key-pressed(event) => {
+        if (event.text == Key.Escape) {
+            root.close();
+            accept
+        } else {
+            reject
+        }
+    }
+}
+
+component SectionLabel inherits Text {
+    font-size: Theme.font-size-normal;
+    font-weight: 700;
+    color: Theme.section-label;
+}
+
+// ── Diálogo de Configuración ─────────────────────────────────────────
+export component SettingsDialog inherits ModalShell {
+    card-width: 460px;
+    card-height: 600px;
+    dialog-title: "Configuración";
+
+    in-out property <string> font-family: "Consolas";
+    in-out property <int> font-size: 14;
+    in-out property <int> tab-size: 4;
+    in-out property <bool> insert-spaces: true;
+    in-out property <bool> word-wrap: false;
+    in-out property <bool> show-line-numbers: true;
+    in-out property <int> autosave-delay-ms: 1000;
+    in-out property <bool> autosave-files: false;
+    in-out property <bool> restore-session: true;
+    in-out property <int> default-view-mode: 0;
+    in-out property <bool> show-toolbar: true;
+    in-out property <bool> show-status-bar: true;
+    in-out property <bool> show-explorer: false;
+    in-out property <bool> preview-selectable: false;
+    // R3: 0 = "Oscuro", 1 = "Océano".
+    in-out property <int> theme: 0;
+
+    callback settings-changed();
+    callback open-data-folder();
+    callback reset-settings();
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 14px;
+            padding-right: 8px;
+
+            SectionLabel { text: "Editor"; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Fuente:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["Consolas", "Cascadia Code", "Cascadia Mono", "Courier New", "Lucida Console"];
+                    current-value: root.font-family;
+                    selected(v) => { root.font-family = v; root.settings-changed(); }
+                }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Tamaño de fuente:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                SpinBox { minimum: 8; maximum: 40; value <=> root.font-size; edited(v) => { root.settings-changed(); } }
+            }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Tamaño de tabulación:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                SpinBox { minimum: 1; maximum: 8; value <=> root.tab-size; edited(v) => { root.settings-changed(); } }
+            }
+            Switch { text: "Insertar espacios en vez de tabulaciones"; checked <=> root.insert-spaces; toggled => { root.settings-changed(); } }
+            Switch { text: "Ajuste de línea"; checked <=> root.word-wrap; toggled => { root.settings-changed(); } }
+            Switch { text: "Mostrar números de línea"; checked <=> root.show-line-numbers; toggled => { root.settings-changed(); } }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Guardado"; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Retardo de autoguardado:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["500 ms", "1 s", "2 s", "5 s"];
+                    current-value: root.autosave-delay-ms == 500 ? "500 ms" : root.autosave-delay-ms == 2000 ? "2 s" : root.autosave-delay-ms == 5000 ? "5 s" : "1 s";
+                    selected(v) => {
+                        root.autosave-delay-ms = v == "500 ms" ? 500 : v == "2 s" ? 2000 : v == "5 s" ? 5000 : 1000;
+                        root.settings-changed();
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: 2px;
+                Switch { text: "Guardar archivos automáticamente"; checked <=> root.autosave-files; toggled => { root.settings-changed(); } }
+                Text {
+                    text: "Los borradores siempre se guardan automáticamente.";
+                    font-size: Theme.font-size-small;
+                    color: Theme.text-muted;
+                }
+            }
+            Switch { text: "Restaurar sesión al iniciar"; checked <=> root.restore-session; toggled => { root.settings-changed(); } }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Vista previa"; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Modo por defecto:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["Solo editor", "Dividido", "Solo vista previa"];
+                    current-value: root.default-view-mode == 1 ? "Dividido" : root.default-view-mode == 2 ? "Solo vista previa" : "Solo editor";
+                    selected(v) => {
+                        root.default-view-mode = v == "Dividido" ? 1 : v == "Solo vista previa" ? 2 : 0;
+                        root.settings-changed();
+                    }
+                }
+            }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Interfaz"; }
+            Switch { text: "Barra de herramientas"; checked <=> root.show-toolbar; toggled => { root.settings-changed(); } }
+            Switch { text: "Barra de estado"; checked <=> root.show-status-bar; toggled => { root.settings-changed(); } }
+            Switch { text: "Mostrar explorador"; checked <=> root.show-explorer; toggled => { root.settings-changed(); } }
+            Switch { text: "Vista previa: texto seleccionable"; checked <=> root.preview-selectable; toggled => { root.settings-changed(); } }
+
+            Rectangle { height: 1px; background: Theme.border; }
+
+            SectionLabel { text: "Apariencia"; }
+            HorizontalLayout {
+                spacing: 8px;
+                Text { text: "Tema:"; color: Theme.text; vertical-alignment: center; width: 170px; }
+                ComboBox {
+                    model: ["Oscuro", "Océano"];
+                    current-value: root.theme == 1 ? "Océano" : "Oscuro";
+                    selected(v) => {
+                        root.theme = v == "Océano" ? 1 : 0;
+                        root.settings-changed();
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        Button { text: "Abrir carpeta de datos"; clicked => { root.open-data-folder(); } }
+        Rectangle { horizontal-stretch: 1; }
+        Button { text: "Restablecer valores"; clicked => { root.reset-settings(); } }
+        Button { text: "Cerrar"; clicked => { root.close(); } }
+    }
+}
+
+// ── Diálogo de Atajos de teclado ─────────────────────────────────────
+export struct ShortcutEntry {
+    category: string,
+    action: string,
+    shortcut: string,
+}
+
+export component ShortcutsDialog inherits ModalShell {
+    card-width: 560px;
+    card-height: 480px;
+    dialog-title: "Atajos de teclado";
+
+    in property <[ShortcutEntry]> shortcuts;
+
+    ScrollView {
+        vertical-stretch: 1;
+        VerticalLayout {
+            spacing: 2px;
+            padding-right: 16px;
+            for s in root.shortcuts: Rectangle {
+                height: s.shortcut == "" ? 26px : 24px;
+
+                if s.shortcut == "": Text {
+                    y: parent.height - self.height;
+                    text: s.action;
+                    font-size: Theme.font-size-normal;
+                    font-weight: 700;
+                    color: Theme.text-bright;
+                    vertical-alignment: bottom;
+                }
+
+                if s.shortcut != "": HorizontalLayout {
+                    spacing: 8px;
+                    Text { text: s.action; font-size: Theme.font-size-normal; color: Theme.text; horizontal-stretch: 1; vertical-alignment: center; }
+                    Rectangle {
+                        // "Keycap": pequeña cápsula con borde, como en VS Code / macOS.
+                        width: keycap-text.preferred-width + 14px;
+                        height: 20px;
+                        border-width: 1px;
+                        border-color: Theme.border-light;
+                        border-radius: Theme.radius-small;
+                        background: Theme.keycap-bg;
+                        keycap-text := Text {
+                            text: s.shortcut;
+                            font-size: Theme.font-size-small;
+                            color: Theme.keycap-text;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        alignment: end;
+        Button { text: "Cerrar"; clicked => { root.close(); } }
+    }
+}
+
+// ── Diálogo Acerca de ─────────────────────────────────────────────────
+export component AboutDialog inherits ModalShell {
+    card-width: 380px;
+    card-height: 280px;
+    dialog-title: "Acerca de LightMark";
+
+    in property <string> app-version: "0.1.0";
+    in property <string> slint-version: "1.18.1";
+
+    VerticalLayout {
+        vertical-stretch: 1;
+        spacing: 6px;
+        alignment: center;
+        Image { source: @image-url("../icons/app-icon.svg"); width: 48px; height: 48px; }
+        Text { text: "LightMark"; font-size: 20px; font-weight: 700; color: Theme.text-bright; horizontal-alignment: center; }
+        Text { text: "Versión " + root.app-version; font-size: Theme.font-size-normal; color: Theme.text-muted; horizontal-alignment: center; }
+        Text {
+            text: "Editor rápido de texto y notas en Rust + Slint.";
+            font-size: Theme.font-size-normal;
+            color: Theme.text;
+            horizontal-alignment: center;
+            wrap: word-wrap;
+        }
+        Text { text: "Licencia MIT"; font-size: Theme.font-size-small; color: Theme.text-muted; horizontal-alignment: center; }
+        Text { text: "Slint " + root.slint-version; font-size: Theme.font-size-small; color: Theme.text-muted; horizontal-alignment: center; }
+    }
+
+    HorizontalLayout {
+        alignment: end;
+        Button { text: "Cerrar"; clicked => { root.close(); } }
+    }
+}
+
+// ── Diálogo Ir a línea ────────────────────────────────────────────────
+export component GotoLineDialog inherits ModalShell {
+    card-width: 300px;
+    card-height: 200px;
+    dialog-title: "Ir a línea";
+
+    in property <int> max-line: 1;
+    in-out property <string> line-input: "";
+    // Se pasa como string; Rust hace el parseo a línea (evita conversión float/int en Slint).
+    callback confirm(string);
+
+    public function focus-input() {
+        input.focus();
+    }
+
+    // V2: `ModalShell.init` ya hace `root.focus()` (para que Esc funcione), pero eso
+    // agarra el foco de teclado para el propio `FocusScope`, no para el `LineEdit` de
+    // dentro — y a veces `input.focus()` llamado directamente en `init` no tiene efecto
+    // porque el elemento aún no tiene geometría asignada (limitación conocida de Slint:
+    // un `focus()` demasiado temprano se pierde). Un `Timer` de disparo único con
+    // `interval: 1ms` difiere el `focus()` un tick, después de que todo esté colocado.
+    property <bool> pending-focus: true;
+    Timer {
+        interval: 1ms;
+        running: root.pending-focus;
+        triggered => {
+            root.pending-focus = false;
+            input.focus();
+        }
+    }
+
+    VerticalLayout {
+        vertical-stretch: 1;
+        spacing: 8px;
+        Text { text: "Línea (1 - " + root.max-line + "):"; font-size: Theme.font-size-normal; color: Theme.text; }
+        input := LineEdit {
+            text <=> root.line-input;
+            input-type: number;
+            accepted => { root.confirm(root.line-input); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.close();
+                    accept
+                } else {
+                    reject
+                }
+            }
+        }
+    }
+
+    HorizontalLayout {
+        alignment: end;
+        spacing: 6px;
+        Button { text: "Cancelar"; clicked => { root.close(); } }
+        Button {
+            text: "Ir";
+            primary: true;
+            clicked => { root.confirm(root.line-input); }
+        }
+    }
+}

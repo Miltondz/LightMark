@@ -1,0 +1,53 @@
+import { Theme } from "../theme.slint";
+
+export struct SegmentInfo {
+    icon: image,
+    tooltip: string,
+    // Hallazgo U18: "Dividido"/"Solo vista previa" no tenían forma de deshabilitarse
+    // cuando el lenguaje activo no soporta vista previa (antes solo se revertía en
+    // silencio en el siguiente refresco de Rust, sin ningún indicio visual).
+    enabled: bool,
+}
+
+// Control segmentado de 2-3 botones (usado para el modo de vista: Editor/Dividido/Vista previa).
+export component SegmentedControl inherits Rectangle {
+    in property <[SegmentInfo]> segments;
+    in property <int> selected: 0;
+    callback selected-changed(int);
+
+    height: Theme.icon-button-size;
+    width: segments.length * Theme.icon-button-size;
+    border-radius: Theme.radius-small;
+    border-width: 1px;
+    border-color: Theme.border;
+    background: Theme.bg;
+    clip: true;
+
+    HorizontalLayout {
+        padding: 1px;
+        spacing: 1px;
+        for seg[i] in root.segments: Rectangle {
+            background: root.selected == i ? Theme.accent-pressed : (seg-ta.has-hover && seg.enabled ? Theme.hover-strong : transparent);
+            border-width: root.selected == i ? 1px : 0px;
+            border-color: Theme.selected-border;
+
+            Image {
+                source: seg.icon;
+                width: Theme.icon-size;
+                height: Theme.icon-size;
+                colorize: seg.enabled ? (root.selected == i ? Theme.text-bright : Theme.icon-color) : Theme.icon-color;
+                opacity: seg.enabled ? 1.0 : 0.4;
+            }
+
+            seg-ta := TouchArea {
+                enabled: seg.enabled;
+                mouse-cursor: seg.enabled ? MouseCursor.pointer : MouseCursor.default;
+                clicked => { root.selected-changed(i); }
+            }
+
+            if seg.tooltip != "": Tooltip {
+                text: @markdown("\{seg.tooltip}");
+            }
+        }
+    }
+}

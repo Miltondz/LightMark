@@ -1,3 +1,6 @@
+// El wiring actual solo usa la sesión automática (`save_auto_session`/
+// `load_auto_session`, "hot exit"); el resto de la API (sesiones nombradas,
+// listar/borrar) queda para una futura función "Guardar sesión como...".
 #![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
@@ -13,6 +16,15 @@ pub struct TabState {
     pub cursor: usize,
     pub scroll_line: usize,
     pub pinned: bool,
+    /// Contenido no guardado de un archivo (para restaurar tras un cierre en caliente / "hot
+    /// exit"). `None` si la pestaña estaba guardada o es un borrador (que se autoguarda solo).
+    #[serde(default)]
+    pub unsaved_content: Option<String>,
+    /// mtime del archivo (segundos desde época Unix) en el momento de guardar la sesión
+    /// (hallazgo C3): permite detectar en la restauración si el archivo cambió en disco desde
+    /// entonces y avisar en vez de sobrescribir en silencio.
+    #[serde(default)]
+    pub mtime: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -55,12 +67,11 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
+    /// Usa `base_dir` directamente como directorio de sesiones (el llamador ya debe pasar el
+    /// directorio final, p.ej. `<app_data>/sessions`; antes anidaba `sessions/sessions`).
     pub fn new(base_dir: PathBuf) -> Self {
-        let sessions_dir = base_dir.join("sessions");
-        std::fs::create_dir_all(&sessions_dir).ok();
-        Self {
-            base_dir: sessions_dir,
-        }
+        std::fs::create_dir_all(&base_dir).ok();
+        Self { base_dir }
     }
 
     pub fn sessions_dir(&self) -> &Path {
@@ -74,13 +85,20 @@ impl SessionManager {
     pub fn save_session(&self, session: &Session, session_id: &str) -> std::io::Result<()> {
         let path = self.session_path(session_id);
         let data = serde_json::to_string_pretty(session)?;
-        std::fs::write(path, data)
+        // Escritura atómica real (hallazgo L10): `workspace::atomic_save` hace `sync_all()`
+        // antes del rename (el `std::fs::write` + `rename` manual de antes no garantizaba que
+        // los datos llegaran a disco antes del rename) y borra el `.tmp` si algo falla a mitad
+        // de camino en vez de dejarlo huérfano.
+        crate::workspace::atomic_save(&path, &data)
     }
 
     pub fn load_session(&self, session_id: &str) -> std::io::Result<Session> {
         let path = self.session_path(session_id);
         let data = std::fs::read_to_string(path)?;
-        let session: Session = serde_json::from_str(&data)?;
+        // Quita el BOM UTF-8 si lo hay (hallazgo M4): un session.json editado/guardado con
+        // Notepad/PowerShell puede llevarlo y rompería el parseo JSON.
+        let data = data.strip_prefix('\u{FEFF}').unwrap_or(&data);
+        let session: Session = serde_json::from_str(data)?;
         Ok(session)
     }
 
@@ -138,4 +156,132 @@ pub fn ensure_sessions_dir(app_data_dir: &Path) -> PathBuf {
     let sessions_dir = get_sessions_dir(app_data_dir);
     std::fs::create_dir_all(&sessions_dir).ok();
     sessions_dir
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-session-test-{}-{}-{}",
+            name,
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn new_does_not_nest_sessions_dir() {
+        let dir = temp_dir("no-nest");
+        let sessions_dir = ensure_sessions_dir(&dir);
+        let manager = SessionManager::new(sessions_dir.clone());
+        assert_eq!(manager.sessions_dir(), sessions_dir.as_path());
+        assert!(!manager.sessions_dir().ends_with("sessions/sessions"));
+        assert!(!manager.sessions_dir().ends_with("sessions\\sessions"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn roundtrip_session() {
+        let dir = temp_dir("roundtrip");
+        let manager = SessionManager::new(dir.clone());
+        let mut session = Session::default();
+        session.groups.push(GroupState {
+            id: 0,
+            tabs: vec![TabState {
+                document_id: "scratch-1".to_string(),
+                path: None,
+                title: "Sin título 1".to_string(),
+                is_scratch: true,
+                cursor: 3,
+                scroll_line: 0,
+                pinned: false,
+                unsaved_content: None,
+                mtime: None,
+            }],
+            active_tab: 0,
+        });
+        manager.save_session(&session, "test").unwrap();
+        let loaded = manager.load_session("test").unwrap();
+        assert_eq!(loaded.groups.len(), 1);
+        assert_eq!(loaded.groups[0].tabs[0].cursor, 3);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn old_json_without_unsaved_content_still_loads() {
+        let dir = temp_dir("old-json");
+        let manager = SessionManager::new(dir.clone());
+        let old_json = r#"{
+            "version": 1,
+            "name": "Old",
+            "created_at": 0,
+            "groups": [
+                {
+                    "id": 0,
+                    "tabs": [
+                        {
+                            "document_id": "tab-0",
+                            "path": null,
+                            "title": "Old title",
+                            "is_scratch": false,
+                            "cursor": 0,
+                            "scroll_line": 0,
+                            "pinned": false
+                        }
+                    ],
+                    "active_tab": 0
+                }
+            ],
+            "active_group": 0,
+            "group_count": 1,
+            "workspace_root": null
+        }"#;
+        std::fs::write(dir.join("legacy.json"), old_json).unwrap();
+        let loaded = manager.load_session("legacy").unwrap();
+        assert_eq!(loaded.groups[0].tabs[0].title, "Old title");
+        assert_eq!(loaded.groups[0].tabs[0].unsaved_content, None);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_session_strips_utf8_bom() {
+        let dir = temp_dir("bom");
+        let manager = SessionManager::new(dir.clone());
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(serde_json::to_string(&Session::default()).unwrap().as_bytes());
+        std::fs::write(dir.join("bomsession.json"), bytes).unwrap();
+        let loaded = manager.load_session("bomsession").unwrap();
+        assert_eq!(loaded.name, "Default Session");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_session_leaves_no_tmp_file() {
+        let dir = temp_dir("no-tmp-leftover");
+        let manager = SessionManager::new(dir.clone());
+        manager.save_session(&Session::default(), "s1").unwrap();
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().map(|x| x == "tmp").unwrap_or(false))
+            .collect();
+        assert!(leftover.is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_missing_session_returns_not_found() {
+        let dir = temp_dir("missing");
+        let manager = SessionManager::new(dir.clone());
+        let err = manager.load_session("nope").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

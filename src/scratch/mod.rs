@@ -1,3 +1,7 @@
+// Este módulo expone una API más amplia (parking/archivado de documentos, título
+// derivado del contenido, `export_to_folder`, etc.) que la que la ventana actual del
+// wiring ejerce: son capacidades ya implementadas y probadas, pensadas para un panel de
+// "borradores archivados" que no forma parte de este pase de reescritura de main.rs.
 #![allow(dead_code)]
 
 use ropey::LineType;
@@ -86,26 +90,72 @@ pub struct ScratchIndex {
 }
 
 impl ScratchIndex {
+    /// Carga el índice. Si el archivo existe pero está corrupto (no es JSON válido), se
+    /// renombra a `.bak` en vez de dejarlo para que el siguiente `save()` lo sobrescriba en
+    /// silencio (hallazgo C4): así el usuario conserva una copia para inspeccionar/recuperar.
     pub fn load(base_dir: &Path) -> Self {
         let index_path = base_dir.join("scratch-index.json");
-        if let Ok(data) = std::fs::read_to_string(index_path)
-            && let Ok(docs) = serde_json::from_str::<Vec<ScratchMetadata>>(&data)
-        {
-            return Self { documents: docs };
-        }
-        Self {
-            documents: Vec::new(),
+        // Se lee como bytes en vez de `read_to_string` (hallazgo L11): un índice no-UTF-8
+        // (corrupción de disco, escritura a medias con bytes inválidos) hacía que
+        // `read_to_string` fallara con el mismo `Err` que "no existe", perdiendo el índice
+        // completo en silencio sin dejar ninguna copia de seguridad.
+        let bytes = match std::fs::read(&index_path) {
+            Ok(b) => b,
+            Err(_) => return Self { documents: Vec::new() },
+        };
+        let bytes = bytes
+            .strip_prefix(&[0xEF, 0xBB, 0xBF][..])
+            .unwrap_or(&bytes);
+        let parsed = std::str::from_utf8(bytes)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Vec<ScratchMetadata>>(s).ok());
+        match parsed {
+            Some(docs) => Self { documents: docs },
+            None => {
+                Self::quarantine_corrupt_index(base_dir, &index_path);
+                Self { documents: Vec::new() }
+            }
         }
     }
 
+    /// Renombra un índice corrupto (JSON inválido o bytes no-UTF-8) a `.bak` para que el
+    /// usuario conserve una copia inspeccionable, en vez de perderlo cuando el siguiente
+    /// `save()` lo sobrescriba en silencio. Si ya existe un `.bak` de una corrupción anterior,
+    /// usa un nombre con marca de tiempo para no perder tampoco esa copia previa (hallazgo L11:
+    /// "no sobrescribir .bak previo").
+    fn quarantine_corrupt_index(base_dir: &Path, index_path: &Path) {
+        let plain_bak = base_dir.join("scratch-index.json.bak");
+        let target = if plain_bak.exists() {
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            base_dir.join(format!("scratch-index.json.bak-{}", ts))
+        } else {
+            plain_bak
+        };
+        std::fs::rename(index_path, target).ok();
+    }
+
+    /// Guarda el índice de forma atómica (hallazgo C4: nunca dejar `scratch-index.json` a
+    /// medio escribir).
     pub fn save(&self, base_dir: &Path) -> std::io::Result<()> {
         let index_path = base_dir.join("scratch-index.json");
         let data = serde_json::to_string_pretty(&self.documents)?;
-        std::fs::write(index_path, data)
+        crate::workspace::atomic_save(&index_path, &data)
     }
 
+    /// Inserta o actualiza (por `id`) una entrada del índice; nunca genera duplicados.
+    /// Conserva el `created_at` original si ya existía (hallazgo G: guardar repetidamente un
+    /// borrador no debe resetear su fecha de creación).
     pub fn add(&mut self, meta: ScratchMetadata) {
-        self.documents.push(meta);
+        if let Some(existing) = self.documents.iter_mut().find(|d| d.id == meta.id) {
+            let created_at = existing.created_at;
+            *existing = meta;
+            existing.created_at = created_at;
+        } else {
+            self.documents.push(meta);
+        }
     }
 
     pub fn update(&mut self, id: &str, modified_at: u64) {
@@ -152,12 +202,18 @@ impl ScratchManager {
         self.next_id_public()
     }
 
+    /// Genera un id único para un nuevo borrador. Incluye un contador atómico monótono además
+    /// del timestamp (hallazgo G): dos llamadas muy próximas en el tiempo podrían obtener el
+    /// mismo timestamp de reloj (resolución/redondeo del sistema), lo que antes podía producir
+    /// ids duplicados; el contador garantiza unicidad dentro del proceso.
     pub fn next_id_public(&self) -> String {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let timestamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or_else(|_| rand_u64());
-        format!("scratch-{}", timestamp)
+        format!("scratch-{}-{}", timestamp, n)
     }
 
     pub fn create_scratch(&self, document: Rope) -> ScratchDocument {
@@ -187,7 +243,9 @@ impl ScratchManager {
         doc: &mut ScratchDocument,
         index: &mut ScratchIndex,
     ) -> std::io::Result<()> {
-        std::fs::write(&doc.file_path, doc.document.to_string())?;
+        // Escritura atómica (hallazgo L8): un corte de luz/proceso a mitad de un
+        // `std::fs::write` dejaba el borrador truncado o vacío en disco.
+        crate::workspace::atomic_save(&doc.file_path, &doc.document.to_string())?;
         let modified_secs = doc
             .modified_at
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -210,6 +268,50 @@ impl ScratchManager {
         index.save(&self.base_dir)?;
         doc.mark_saved();
         Ok(())
+    }
+
+    /// Guarda varios borradores en un solo paso, cargando y guardando el índice una única vez
+    /// (evita E/S redundante frente a llamar `save_scratch` en bucle). Escritura atómica por
+    /// borrador (hallazgo L8). Si UNO falla (disco lleno, ruta inválida, etc.), los DEMÁS se
+    /// siguen guardando en vez de abortar todo el lote con `?` (hallazgo L9): el índice se
+    /// guarda solo con los que tuvieron éxito, y se devuelve el primer error encontrado para
+    /// que el llamador lo pueda mostrar (pero ya con el resto de borradores a salvo en disco).
+    pub fn save_scratch_batch(&self, docs: &mut [ScratchDocument]) -> std::io::Result<()> {
+        let mut index = ScratchIndex::load(&self.base_dir);
+        let mut first_error: Option<std::io::Error> = None;
+        for doc in docs.iter_mut() {
+            if let Err(e) = crate::workspace::atomic_save(&doc.file_path, &doc.document.to_string())
+            {
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
+                continue;
+            }
+            let modified_secs = doc
+                .modified_at
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            index.add(ScratchMetadata {
+                id: doc.id.clone(),
+                title: doc.title.clone(),
+                file_path: doc.file_path.to_string_lossy().to_string(),
+                created_at: doc
+                    .created_at
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                modified_at: modified_secs,
+                language: doc.language.clone(),
+                status: doc.status.clone(),
+            });
+            doc.mark_saved();
+        }
+        index.save(&self.base_dir)?;
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
     pub fn load_scratch(&self, meta: &ScratchMetadata) -> std::io::Result<ScratchDocument> {
@@ -256,30 +358,6 @@ impl ScratchManager {
         Ok(())
     }
 
-    pub fn set_inbox(&self, doc: &mut ScratchDocument) -> std::io::Result<()> {
-        doc.status = DocumentStatus::Inbox;
-        let modified_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut index = ScratchIndex::load(&self.base_dir);
-        index.update_with_status(&doc.id, modified_secs, doc.status.clone());
-        index.save(&self.base_dir)?;
-        Ok(())
-    }
-
-    pub fn archive_document(&self, doc: &mut ScratchDocument) -> std::io::Result<()> {
-        doc.status = DocumentStatus::Archived;
-        let modified_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let mut index = ScratchIndex::load(&self.base_dir);
-        index.update_with_status(&doc.id, modified_secs, doc.status.clone());
-        index.save(&self.base_dir)?;
-        Ok(())
-    }
-
     pub fn list_parked_documents(&self) -> std::io::Result<Vec<ScratchMetadata>> {
         let index = ScratchIndex::load(&self.base_dir);
         Ok(index
@@ -298,16 +376,6 @@ fn rand_u64() -> u64 {
         .unwrap_or(0)
 }
 
-// Helper function to generate a random ID if needed
-fn random_id() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("scratch-{}", nanos)
-}
-
 pub fn get_app_data_dir() -> PathBuf {
     let local = std::env::var("LOCALAPPDATA")
         .unwrap_or_else(|_| std::env::var("APPDATA").unwrap_or(".".to_string()));
@@ -324,9 +392,29 @@ pub fn ensure_scratch_dirs() -> PathBuf {
     scratch_dir
 }
 
+/// Heurística SQL estricta (hallazgo L23): reimplementación local de
+/// `editor::looks_like_sql` (no se puede depender de `editor.rs`, que pertenece al pase de
+/// wiring en curso). Antes, `detect_language` usaba `contains("select ")`, que etiquetaba como
+/// SQL cualquier prosa que contuviera la palabra "select" en cualquier contexto (p.ej. "please
+/// select an option below"). Exige la forma de una instrucción real (`SELECT ... FROM`,
+/// `INSERT INTO`, `UPDATE ... SET`, `DELETE FROM`, `CREATE TABLE/VIEW/...`, `WITH x AS (`).
+fn looks_like_sql(sample: &str) -> bool {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| {
+        regex::RegexBuilder::new(
+            r"^\s*(select\b.+\bfrom\b|insert\s+into\b|update\s+\S+\s+set\b|delete\s+from\b|create\s+(table|view|index|database|procedure|function)\b|with\s+\w+\s+as\s*\()",
+        )
+        .case_insensitive(true)
+        .dot_matches_new_line(true)
+        .build()
+        .expect("regex SQL heurística válida")
+    });
+    re.is_match(sample)
+}
+
 pub fn detect_language(content: &str) -> Option<String> {
     let lower = content.to_lowercase();
-    if lower.contains("```sql") || lower.contains("select ") || lower.contains("create table") {
+    if lower.contains("```sql") || looks_like_sql(content) || lower.contains("create table") {
         return Some("sql".to_string());
     }
     if lower.contains("```json")
@@ -501,9 +589,10 @@ pub fn export_to_zip(archived_docs: &[ScratchDocument], dest_path: &Path) -> std
 
         let filename = format!("{:02}-{}.{}", i + 1, name, ext);
         let content = doc.document.to_string();
+        let crc = crc32(content.as_bytes());
 
         // Local file header
-        let local_header = create_zip_local_header(&filename, content.len(), date_time);
+        let local_header = create_zip_local_header(&filename, content.len(), date_time, crc);
         zip_file.write_all(&local_header)?;
         zip_file.write_all(content.as_bytes())?;
 
@@ -512,6 +601,7 @@ pub fn export_to_zip(archived_docs: &[ScratchDocument], dest_path: &Path) -> std
             content.len(),
             offset,
             date_time,
+            crc,
         ));
 
         offset += local_header.len() as u32 + content.len() as u32;
@@ -531,7 +621,7 @@ pub fn export_to_zip(archived_docs: &[ScratchDocument], dest_path: &Path) -> std
     Ok(())
 }
 
-fn create_zip_local_header(filename: &str, size: usize, date_time: u64) -> Vec<u8> {
+fn create_zip_local_header(filename: &str, size: usize, date_time: u64, crc: u32) -> Vec<u8> {
     let name_bytes = filename.as_bytes();
     let (date, time) = dos_date_time(date_time);
 
@@ -540,16 +630,17 @@ fn create_zip_local_header(filename: &str, size: usize, date_time: u64) -> Vec<u
     header.extend_from_slice(&0x04034b50u32.to_le_bytes());
     // Version needed to extract
     header.extend_from_slice(&20u16.to_le_bytes());
-    // General purpose bit flag
-    header.extend_from_slice(&0u16.to_le_bytes());
+    // General purpose bit flag: bit 11 (0x0800) = nombre de archivo/comentario en UTF-8
+    // (hallazgo G), para que extractores no asuman CP437/latin1 con nombres no-ASCII.
+    header.extend_from_slice(&0x0800u16.to_le_bytes());
     // Compression method (stored)
     header.extend_from_slice(&0u16.to_le_bytes());
     // Last mod file time
     header.extend_from_slice(&time.to_le_bytes());
     // Last mod file date
     header.extend_from_slice(&date.to_le_bytes());
-    // CRC-32 (we'll set it to 0 for now)
-    header.extend_from_slice(&0u32.to_le_bytes());
+    // CRC-32
+    header.extend_from_slice(&crc.to_le_bytes());
     // Compressed size
     header.extend_from_slice(&(size as u32).to_le_bytes());
     // Uncompressed size
@@ -564,7 +655,13 @@ fn create_zip_local_header(filename: &str, size: usize, date_time: u64) -> Vec<u
     header
 }
 
-fn create_zip_central_header(filename: &str, size: usize, offset: u32, date_time: u64) -> Vec<u8> {
+fn create_zip_central_header(
+    filename: &str,
+    size: usize,
+    offset: u32,
+    date_time: u64,
+    crc: u32,
+) -> Vec<u8> {
     let name_bytes = filename.as_bytes();
     let (date, time) = dos_date_time(date_time);
 
@@ -575,8 +672,8 @@ fn create_zip_central_header(filename: &str, size: usize, offset: u32, date_time
     header.extend_from_slice(&20u16.to_le_bytes());
     // Version needed to extract
     header.extend_from_slice(&20u16.to_le_bytes());
-    // General purpose bit flag
-    header.extend_from_slice(&0u16.to_le_bytes());
+    // General purpose bit flag: bit 11 (0x0800) = UTF-8, igual que en el header local.
+    header.extend_from_slice(&0x0800u16.to_le_bytes());
     // Compression method
     header.extend_from_slice(&0u16.to_le_bytes());
     // Last mod file time
@@ -584,7 +681,7 @@ fn create_zip_central_header(filename: &str, size: usize, offset: u32, date_time
     // Last mod file date
     header.extend_from_slice(&date.to_le_bytes());
     // CRC-32
-    header.extend_from_slice(&0u32.to_le_bytes());
+    header.extend_from_slice(&crc.to_le_bytes());
     // Compressed size
     header.extend_from_slice(&(size as u32).to_le_bytes());
     // Uncompressed size
@@ -643,4 +740,268 @@ fn dos_date_time(unix_time: u64) -> (u16, u16) {
         (((date.year() - 1980) as u16) << 9) | ((date.month() as u16) << 5) | (date.day() as u16);
 
     (dos_date, dos_time)
+}
+
+/// Genera la tabla de CRC-32 (polinomio IEEE 802.3, 0xEDB88320) usada por el formato ZIP.
+fn crc32_table() -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0u32;
+    while i < 256 {
+        let mut c = i;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 1 == 1 {
+                0xEDB88320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
+            k += 1;
+        }
+        table[i as usize] = c;
+        i += 1;
+    }
+    table
+}
+
+/// Calcula el CRC-32 (variante ZIP/PNG) de `data`.
+fn crc32(data: &[u8]) -> u32 {
+    let table = crc32_table();
+    let mut crc = 0xFFFFFFFFu32;
+    for &b in data {
+        let idx = ((crc ^ b as u32) & 0xFF) as usize;
+        crc = table[idx] ^ (crc >> 8);
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc32_matches_known_vector() {
+        assert_eq!(crc32(b"hello"), 0x3610a686);
+    }
+
+    #[test]
+    fn crc32_empty_is_zero() {
+        assert_eq!(crc32(b""), 0);
+    }
+
+    #[test]
+    fn scratch_index_add_upserts_by_id() {
+        let mut index = ScratchIndex { documents: Vec::new() };
+        index.add(ScratchMetadata {
+            id: "a".to_string(),
+            title: "First".to_string(),
+            file_path: "a.md".to_string(),
+            created_at: 1,
+            modified_at: 1,
+            language: None,
+            status: DocumentStatus::Active,
+        });
+        index.add(ScratchMetadata {
+            id: "a".to_string(),
+            title: "Updated".to_string(),
+            file_path: "a.md".to_string(),
+            created_at: 1,
+            modified_at: 2,
+            language: None,
+            status: DocumentStatus::Active,
+        });
+        assert_eq!(index.documents.len(), 1);
+        assert_eq!(index.documents[0].title, "Updated");
+    }
+
+    #[test]
+    fn next_id_public_is_unique_even_when_called_rapidly() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-ids-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let manager = ScratchManager::new(dir.clone());
+        let ids: Vec<String> = (0..50).map(|_| manager.next_id_public()).collect();
+        let unique: std::collections::HashSet<_> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn corrupt_index_is_renamed_to_bak_not_overwritten_silently() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-corrupt-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scratch-index.json"), "{ not valid json").unwrap();
+        let index = ScratchIndex::load(&dir);
+        assert!(index.documents.is_empty());
+        assert!(dir.join("scratch-index.json.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_scratch_batch_preserves_created_at_across_saves() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-created-at-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let manager = ScratchManager::new(dir.clone());
+        let mut doc = manager.create_scratch_with_id("t1".to_string(), Rope::from_str("v1"));
+        doc.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        manager.save_scratch_batch(&mut [doc]).unwrap();
+
+        let mut doc2 = manager.create_scratch_with_id("t1".to_string(), Rope::from_str("v2"));
+        doc2.created_at = SystemTime::UNIX_EPOCH + Duration::from_secs(999); // distinto a propósito
+        manager.save_scratch_batch(&mut [doc2]).unwrap();
+
+        let index = ScratchIndex::load(&dir);
+        let entry = index.documents.iter().find(|d| d.id == "t1").unwrap();
+        assert_eq!(entry.created_at, 100);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn export_to_zip_produces_valid_signature_and_crc() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-zip-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let manager = ScratchManager::new(dir.clone());
+        let mut doc = manager.create_scratch_with_id("t1".to_string(), Rope::from_str("hello"));
+        doc.language = Some("txt".to_string());
+
+        let zip_path = dir.join("out.zip");
+        export_to_zip(&[doc], &zip_path).unwrap();
+
+        let bytes = std::fs::read(&zip_path).unwrap();
+        assert_eq!(&bytes[0..4], &[0x50, 0x4b, 0x03, 0x04]); // "PK\x03\x04"
+
+        // El CRC-32 del contenido local debe coincidir con crc32("hello").
+        let crc_bytes = &bytes[14..18];
+        let crc = u32::from_le_bytes([crc_bytes[0], crc_bytes[1], crc_bytes[2], crc_bytes[3]]);
+        assert_eq!(crc, 0x3610a686);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_scratch_batch_leaves_no_tmp_file_atomic_write() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-atomic-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let manager = ScratchManager::new(dir.clone());
+        let mut doc = manager.create_scratch_with_id("a".to_string(), Rope::from_str("hola"));
+        manager.save_scratch_batch(std::slice::from_mut(&mut doc)).unwrap();
+        assert_eq!(std::fs::read_to_string(&doc.file_path).unwrap(), "hola");
+        assert!(!doc.file_path.with_extension("md.tmp").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn load_non_utf8_index_is_quarantined_not_lost_silently() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-nonutf8-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scratch-index.json"), [b'[', 0xFF, b']']).unwrap();
+        let idx = ScratchIndex::load(&dir);
+        assert!(idx.documents.is_empty());
+        assert!(dir.join("scratch-index.json.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn second_corruption_does_not_overwrite_previous_bak() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-doublecorrupt-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scratch-index.json"), "{corrupt-1").unwrap();
+        let _ = ScratchIndex::load(&dir);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scratch-index.json.bak")).unwrap(),
+            "{corrupt-1"
+        );
+        std::fs::write(dir.join("scratch-index.json"), "{corrupt-2").unwrap();
+        let _ = ScratchIndex::load(&dir);
+        // El .bak original (corrupt-1) debe seguir intacto; la segunda corrupción se guarda
+        // aparte con marca de tiempo, nunca pisando la copia anterior.
+        assert_eq!(
+            std::fs::read_to_string(dir.join("scratch-index.json.bak")).unwrap(),
+            "{corrupt-1"
+        );
+        let has_timestamped_bak = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("scratch-index.json.bak-")
+            });
+        assert!(has_timestamped_bak, "esperaba un .bak-<timestamp> para la segunda corrupción");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_scratch_batch_continues_after_one_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "lightmark-scratch-partial-fail-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let manager = ScratchManager::new(dir.clone());
+        let mut good1 = manager.create_scratch_with_id("ok1".to_string(), Rope::from_str("uno"));
+        // Ruta con un directorio padre inexistente: falla al escribir.
+        let mut bad = ScratchDocument::new(
+            "bad".to_string(),
+            Rope::from_str("x"),
+            &dir.join("no-existe-dir-alguno"),
+        );
+        let mut good2 = manager.create_scratch_with_id("ok2".to_string(), Rope::from_str("dos"));
+
+        let result = manager.save_scratch_batch(std::slice::from_mut(&mut good1));
+        assert!(result.is_ok());
+        let result_bad = manager.save_scratch_batch(std::slice::from_mut(&mut bad));
+        assert!(result_bad.is_err());
+        let result2 = manager.save_scratch_batch(std::slice::from_mut(&mut good2));
+        assert!(result2.is_ok());
+
+        // Ambos borradores "buenos" deben haberse guardado (y estar en el índice) a pesar del
+        // fallo del malo en su propio lote.
+        let index = ScratchIndex::load(&dir);
+        assert!(index.documents.iter().any(|d| d.id == "ok1"));
+        assert!(index.documents.iter().any(|d| d.id == "ok2"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn detect_language_requires_real_sql_statement_shape() {
+        assert_eq!(
+            detect_language("please select an option from the menu below"),
+            None
+        );
+        assert_eq!(
+            detect_language("SELECT id, name FROM users WHERE active = 1"),
+            Some("sql".to_string())
+        );
+        assert_eq!(
+            detect_language("INSERT INTO users (id) VALUES (1)"),
+            Some("sql".to_string())
+        );
+    }
 }

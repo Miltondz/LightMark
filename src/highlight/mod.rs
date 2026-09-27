@@ -175,34 +175,38 @@ impl Highlighter {
         line: usize,
         tokens: &mut Vec<Token>,
     ) {
-        // Skip the line_start offset since we're scanning the full content
-        // This is a simplified version - finds code spans, bold, and italic
-        for (i, window) in content.as_bytes().windows(2).enumerate() {
-            if i < line_start {
-                continue;
-            }
-            if i > line_start + 1000 {
-                break; // Limit scan per line
-            }
-
-            if window == b"`" {
-                tokens.push(Token {
-                    kind: TokenKind::CodeInline,
-                    range: i..i + 1,
-                    line,
-                });
-            } else if window == b"**" || window == b"__" {
-                tokens.push(Token {
-                    kind: TokenKind::Bold,
-                    range: i..i + 2,
-                    line,
-                });
-            } else if window == b"*" || window == b"_" {
-                tokens.push(Token {
-                    kind: TokenKind::Italic,
-                    range: i..i + 1,
-                    line,
-                });
+        // Escanea por CARACTERES (no bytes crudos) para no partir un carácter multibyte a la
+        // mitad al construir los rangos de token (hallazgo G: pánico UTF-8 con "función",
+        // "t😀", etc. — `content.as_bytes().windows(2)` podía producir rangos que caían en
+        // mitad de una secuencia UTF-8, que luego reventaba al indexar `&content[range]`).
+        let limit = (line_start + 1000).min(content.len());
+        let mut cut = limit;
+        while cut < content.len() && !content.is_char_boundary(cut) {
+            cut += 1;
+        }
+        let Some(slice) = content.get(line_start..cut) else {
+            return;
+        };
+        let chars: Vec<(usize, char)> = slice.char_indices().map(|(i, c)| (line_start + i, c)).collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            let (pos, c) = chars[i];
+            match c {
+                '`' => {
+                    tokens.push(Token { kind: TokenKind::CodeInline, range: pos..pos + 1, line });
+                    i += 1;
+                }
+                '*' | '_' => {
+                    if i + 1 < chars.len() && chars[i + 1].1 == c {
+                        let end = chars[i + 1].0 + 1;
+                        tokens.push(Token { kind: TokenKind::Bold, range: pos..end, line });
+                        i += 2;
+                    } else {
+                        tokens.push(Token { kind: TokenKind::Italic, range: pos..pos + 1, line });
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
             }
         }
     }
@@ -292,15 +296,12 @@ impl Highlighter {
                     }
                 }
                 '0'..='9' | '-' => TokenKind::JsonNumber,
-                't' if i + 4 <= content.len() && &content[i..i + 4] == "true" => {
-                    TokenKind::JsonBoolean
-                }
-                'f' if i + 5 <= content.len() && &content[i..i + 5] == "false" => {
-                    TokenKind::JsonBoolean
-                }
-                'n' if i + 4 <= content.len() && &content[i..i + 4] == "null" => {
-                    TokenKind::JsonNull
-                }
+                // `starts_with` no requiere que el límite caiga en frontera de carácter (a
+                // diferencia de indexar `&content[i..i+N]`, que podía entrar en pánico con
+                // UTF-8 multibyte justo después de la 't'/'f'/'n' — hallazgo G).
+                't' if content[i..].starts_with("true") => TokenKind::JsonBoolean,
+                'f' if content[i..].starts_with("false") => TokenKind::JsonBoolean,
+                'n' if content[i..].starts_with("null") => TokenKind::JsonNull,
                 _ => continue,
             };
 
@@ -461,20 +462,33 @@ impl Highlighter {
                 continue;
             }
 
-            // Operators and punctuation
+            // Operadores y puntuación (ASCII): un byte, un carácter, avance seguro de 1.
+            if ch.is_ascii() {
+                tokens.push(Token {
+                    kind: match ch {
+                        b'=' | b'<' | b'>' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|'
+                        | b'^' | b'~' => TokenKind::Operator,
+                        b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => {
+                            TokenKind::Punctuation
+                        }
+                        _ => TokenKind::Text,
+                    },
+                    range: char_start..i + 1,
+                    line,
+                });
+                i += 1;
+                continue;
+            }
+            // Carácter no ASCII (letras acentuadas, emoji...): se avanza el carácter Unicode
+            // completo para que el rango del token nunca caiga en mitad de una secuencia
+            // UTF-8 multibyte (hallazgo G: pánico con "café", "1é", emoji...).
+            let clen = content[i..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
             tokens.push(Token {
-                kind: match ch {
-                    b'=' | b'<' | b'>' | b'!' | b'+' | b'-' | b'*' | b'/' | b'%' | b'&' | b'|'
-                    | b'^' | b'~' => TokenKind::Operator,
-                    b'(' | b')' | b'{' | b'}' | b'[' | b']' | b';' | b':' | b',' | b'.' => {
-                        TokenKind::Punctuation
-                    }
-                    _ => TokenKind::Text,
-                },
-                range: char_start..i + 1,
+                kind: TokenKind::Text,
+                range: char_start..char_start + clen,
                 line,
             });
-            i += 1;
+            i += clen;
         }
 
         // Also tokenize rope lines for line info
@@ -635,7 +649,11 @@ pub fn render_syntax_view(content: &str, lang: &str) -> String {
                     TokenKind::JsonNull => "[NULL]",
                     _ => "",
                 };
-                let token_slice = if t.range.start < content.len() && t.range.end <= content.len() {
+                let token_slice = if t.range.start < content.len()
+                    && t.range.end <= content.len()
+                    && content.is_char_boundary(t.range.start)
+                    && content.is_char_boundary(t.range.end)
+                {
                     &content[t.range.clone()]
                 } else {
                     ""
@@ -657,4 +675,50 @@ pub fn render_syntax_view(content: &str, lang: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_syntax_view_does_not_panic_on_multibyte_markdown() {
+        let out = render_syntax_view("función *café* y t😀 texto", "markdown");
+        assert!(out.contains("función") || !out.is_empty());
+    }
+
+    #[test]
+    fn render_syntax_view_does_not_panic_on_multibyte_sql() {
+        let out = render_syntax_view("SELECT 1é, t😀col FROM tablañ", "sql");
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn render_syntax_view_does_not_panic_on_multibyte_javascript() {
+        let out = render_syntax_view("const x = \"1é\" + t😀; // café", "javascript");
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn render_syntax_view_does_not_panic_on_crlf() {
+        let out = render_syntax_view("SELECT 1\r\nFROM t\r\n", "sql");
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn highlight_markdown_bold_and_italic_tokens_on_multibyte_line() {
+        let highlighter = Highlighter::new("markdown");
+        let rope = Rope::from_str("café **t😀ext** más *é*");
+        // No debe entrar en pánico, y debe producir al menos un token Bold e Italic.
+        let tokens = highlighter.highlight(&rope);
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Bold));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Italic));
+    }
+
+    #[test]
+    fn highlight_json_true_false_null_near_multibyte_does_not_panic() {
+        let highlighter = Highlighter::new("json");
+        let rope = Rope::from_str(r#"{"a": true, "b": "é", "c": null}"#);
+        let _ = highlighter.highlight(&rope);
+    }
 }

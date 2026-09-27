@@ -1,0 +1,283 @@
+import { Theme } from "../theme.slint";
+
+export struct TabInfo {
+    title: string,
+    dirty: bool,
+    tooltip: string,
+}
+
+component TabItem inherits Rectangle {
+    in property <string> title: "";
+    in property <bool> dirty: false;
+    in property <string> tooltip: "";
+    in property <bool> is-active: false;
+    callback tab-clicked();
+    callback close-clicked();
+    callback middle-clicked();
+    // U16: cuando esta pestaña se vuelve la activa (clic, Ctrl+Tab, cerrar otra
+    // pestaña...), avisa a `TabBar` con su propia posición/ancho para que la desplace
+    // a la vista si queda fuera del área visible del `Flickable`.
+    callback reveal(length, length);
+    // V5: al `init`/cambiar `is-active` el elemento a menudo TODAVÍA no tiene geometría
+    // real asignada por el layout (self.x/self.width valen 0 en ese primer instante —
+    // limitación conocida de Slint), así que llamar a `reveal` inmediatamente usaba
+    // coordenadas basura y no desplazaba nada. Un `Timer` de un solo disparo (se
+    // autodesactiva tras el primer `triggered`) difiere la llamada un tick, para cuando
+    // el layout ya colocó el elemento en su posición real.
+    property <bool> pending-reveal: true;
+    Timer {
+        interval: 1ms;
+        running: root.pending-reveal && root.is-active;
+        triggered => {
+            root.pending-reveal = false;
+            root.reveal(root.x, root.width);
+        }
+    }
+    changed is-active => {
+        if (root.is-active) {
+            root.reveal(self.x, self.width);
+        }
+    }
+    // Hallazgo W27: `changed is-active` solo dispara en CAMBIOS posteriores, nunca en la
+    // asignación inicial de la propiedad — y `TabBar`/`refresh_tabs` (en Rust)
+    // reconstruye el `VecModel` de pestañas entero en cada refresco completo, así que
+    // cada `TabItem` es una instancia NUEVA con `is-active` ya puesto desde el
+    // principio. Sin este `init`, la pestaña activa inicial (al arrancar con una sesión
+    // restaurada, o tras cualquier refresco que reconstruya la lista) nunca se
+    // desplazaba a la vista si quedaba fuera del área visible (además del `Timer` de
+    // arriba, que cubre el caso de geometría todavía no asignada).
+    init => {
+        if (root.is-active) {
+            root.reveal(self.x, self.width);
+        }
+    }
+
+    height: Theme.tab-height;
+    min-width: 90px;
+    max-width: 200px;
+    background: root.is-active ? Theme.bg : (tab-ta.has-hover ? Theme.hover : Theme.sidebar-bg);
+
+    // U17: el área clicable/tooltip cubre toda la pestaña (antes solo el texto), como en
+    // VS Code — se declara primero para que quede debajo de los hijos visuales pero siga
+    // recibiendo el evento en toda la superficie del TabItem.
+    tab-ta := TouchArea {
+        clicked => { root.tab-clicked(); }
+        pointer-event(event) => {
+            if event.button == PointerEventButton.middle && event.kind == PointerEventKind.up {
+                root.middle-clicked();
+            }
+        }
+        mouse-cursor: pointer;
+    }
+
+    if root.tooltip != "": Tooltip {
+        text: @markdown("\{root.tooltip}");
+    }
+
+    if root.is-active: Rectangle {
+        x: 0px;
+        y: 0px;
+        width: 100%;
+        height: 2px;
+        background: Theme.accent;
+    }
+
+    HorizontalLayout {
+        padding-left: 10px;
+        padding-right: 4px;
+        spacing: 4px;
+
+        Rectangle {
+            horizontal-stretch: 1;
+
+            Text {
+                text: root.title;
+                font-size: Theme.font-size-normal;
+                color: root.is-active ? Theme.text-bright : (tab-ta.has-hover ? Theme.text : Theme.text-muted);
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // Indicador de "sucio" o botón cerrar (se convierte en × al pasar el mouse).
+        Rectangle {
+            width: 20px;
+            height: 20px;
+            border-radius: Theme.radius-small;
+            background: close-ta.has-hover ? Theme.hover-strong : transparent;
+
+            Text {
+                // V12: la × solo debe verse en la pestaña activa, en hover, o cuando la
+                // pestaña está sucia (●); antes se veía en TODAS las pestañas inactivas.
+                visible: root.is-active || close-ta.has-hover || root.dirty;
+                text: root.dirty && !close-ta.has-hover ? "●" : "×";
+                font-size: root.dirty && !close-ta.has-hover ? 14px : 15px;
+                font-weight: 700;
+                color: root.dirty && !close-ta.has-hover
+                    ? Theme.text-bright
+                    : (close-ta.has-hover ? Theme.text-bright : (root.is-active ? Theme.text : Theme.text-disabled));
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            close-ta := TouchArea {
+                clicked => { root.close-clicked(); }
+                mouse-cursor: pointer;
+            }
+
+            if close-ta.has-hover: Tooltip {
+                text: @markdown("Cerrar pestaña");
+            }
+        }
+    }
+}
+
+component GroupChip inherits Rectangle {
+    in property <int> group-number: 1;
+    in property <bool> is-active: false;
+    // V13: los chips de grupo no distinguían un grupo "en uso" (con pestañas) de uno
+    // vacío; ahora un grupo en uso se ve con un punto bajo el número y color de texto
+    // normal, y un grupo vacío queda atenuado (sin punto).
+    in property <bool> used: false;
+    callback clicked();
+
+    width: 20px;
+    height: 20px;
+    border-radius: Theme.radius-small;
+    background: root.is-active ? Theme.accent-pressed : (chip-ta.has-hover ? Theme.hover : transparent);
+    border-width: root.is-active ? 1px : 0px;
+    border-color: Theme.selected-border;
+
+    Text {
+        y: 1px;
+        text: root.group-number;
+        font-size: Theme.font-size-small;
+        color: root.is-active ? Theme.text-bright : (root.used ? Theme.text-muted : Theme.text-disabled);
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+
+    if root.used: Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: parent.height - 5px;
+        width: 3px;
+        height: 3px;
+        border-radius: 1.5px;
+        background: root.is-active ? Theme.text-bright : Theme.accent;
+    }
+
+    chip-ta := TouchArea {
+        clicked => { root.clicked(); }
+        mouse-cursor: pointer;
+    }
+
+    property <string> vacio-suffix: root.used ? "" : " (vacío)";
+    Tooltip {
+        text: @markdown("Grupo \{root.group-number} (Alt+\{root.group-number})\{root.vacio-suffix}");
+    }
+}
+
+// Barra de pestañas con scroll horizontal, chips de grupo y botón "+".
+export component TabBar inherits Rectangle {
+    in property <[TabInfo]> tabs;
+    in property <int> active-tab: 0;
+    in property <int> active-group: 0;
+    in property <int> group-count-used: 1;
+
+    callback tab-clicked(int);
+    callback close-tab(int);
+    callback new-tab();
+    callback switch-group(int);
+
+    // U16: desplaza el `Flickable` de pestañas lo mínimo necesario para que la pestaña
+    // en (x, w) quede totalmente visible (misma fórmula que el auto-scroll del cursor
+    // en CodeEditor, adaptada a `viewport-x`).
+    public function reveal-tab(x: length, w: length) {
+        if (x + tabs-flick.content-x < 0px) {
+            tabs-flick.content-x = min(0px, -x);
+        } else if (x + w + tabs-flick.content-x > tabs-flick.width) {
+            tabs-flick.content-x = min(0px, tabs-flick.width - x - w);
+        }
+    }
+
+    height: Theme.tab-height;
+    background: Theme.sidebar-bg;
+
+    HorizontalLayout {
+        spacing: 2px;
+        padding: 0px;
+
+        // Chips de grupo (siempre visibles: 1-4)
+        HorizontalLayout {
+            padding-left: 4px;
+            padding-right: 4px;
+            spacing: 2px;
+            for g in 4: GroupChip {
+                group-number: g + 1;
+                is-active: root.active-group == g;
+                used: g < root.group-count-used;
+                clicked => { root.switch-group(g); }
+            }
+        }
+
+        Rectangle { width: 1px; background: Theme.border; }
+
+        tabs-flick := Flickable {
+            horizontal-stretch: 1;
+            content-width: max(self.width, tabs-row.preferred-width);
+            // U16: arrastrar dentro del área de pestañas no debe hacer "pan" (chocaba con
+            // el clic normal de una pestaña, que quedaba interpretado como arrastre).
+            mouse-drag-pan-enabled: false;
+
+            tabs-row := HorizontalLayout {
+                spacing: 0px;
+                padding: 0px;
+                alignment: start;
+
+                for tab[i] in root.tabs: TabItem {
+                    title: tab.title;
+                    dirty: tab.dirty;
+                    tooltip: tab.tooltip;
+                    is-active: root.active-tab == i;
+                    tab-clicked => { root.tab-clicked(i); }
+                    close-clicked => { root.close-tab(i); }
+                    middle-clicked => { root.close-tab(i); }
+                    reveal(x, w) => { root.reveal-tab(x, w); }
+                }
+            }
+        }
+
+        // V5: el botón "+" vive FUERA del Flickable para que siempre sea visible,
+        // incluso cuando hay tantas pestañas que la fila necesita desplazarse.
+        Rectangle {
+            width: 30px;
+            height: Theme.tab-height;
+            background: add-ta.has-hover ? Theme.hover-strong : transparent;
+
+            Text {
+                text: "+";
+                font-size: 18px;
+                font-weight: 600;
+                color: add-ta.has-hover ? Theme.text-bright : Theme.text-muted;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+
+            add-ta := TouchArea {
+                clicked => { root.new-tab(); }
+                mouse-cursor: pointer;
+            }
+
+            Tooltip {
+                text: @markdown("Nueva pestaña (Ctrl+N)");
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        width: 100%;
+        background: Theme.border;
+    }
+}

@@ -1,0 +1,70 @@
+import { Theme } from "../theme.slint";
+
+export component StatusBar inherits Rectangle {
+    in property <string> status-text: "Listo";
+    in property <int> line: 1;
+    in property <int> column: 1;
+    in property <string> doc-stats: "";
+    in property <string> language-label: "";
+    in property <string> line-ending: "LF";
+    // U27: zoom_level no tenía ningún consumidor en la UI; se muestra aquí solo cuando
+    // difiere del 100% (el zoom en sí ya lo aplica Rust escalando font_size).
+    in property <float> zoom-level: 1.0;
+
+    height: Theme.status-bar-height;
+    background: Theme.status-bar-bg;
+
+    Rectangle { y: 0px; height: 1px; width: 100%; background: Theme.status-bar-border; }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        spacing: 12px;
+
+        Text {
+            text: root.status-text;
+            font-size: Theme.font-size-small;
+            color: Theme.text-bright;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+
+        Text {
+            text: "Lín " + root.line + ", col " + root.column;
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.doc-stats;
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.language-label;
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: "UTF-8";
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.line-ending;
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+        if Math.abs(root.zoom-level - 1.0) > 0.01: Text {
+            text: Math.round(root.zoom-level * 100) + "%";
+            font-size: Theme.font-size-small;
+            color: Theme.status-bar-text;
+            vertical-alignment: center;
+        }
+    }
+}

@@ -1,0 +1,589 @@
+import { Theme } from "theme.slint";
+import { IconButton } from "components/icon_button.slint";
+import { ToolbarSeparator } from "components/separator.slint";
+import { SegmentedControl, SegmentInfo } from "components/segmented_control.slint";
+import { TabBar, TabInfo } from "components/tab_bar.slint";
+import { CodeEditor } from "components/code_editor.slint";
+import { SearchPanel } from "components/search_panel.slint";
+import { Explorer, ExplorerEntry } from "components/explorer.slint";
+import { PreviewPanel, PreviewLine } from "components/preview_panel.slint";
+import { StatusBar } from "components/status_bar.slint";
+import { SettingsDialog, ShortcutsDialog, AboutDialog, GotoLineDialog, ShortcutEntry } from "components/dialogs.slint";
+
+// Re-exportamos los structs de datos para que estén disponibles en el
+// binding de Rust generado a partir de este documento (ver UI_CONTRACT.md).
+export { PreviewLine, TabInfo, ExplorerEntry, ShortcutEntry }
+
+export component App inherits Window {
+    min-width: 640px;
+    min-height: 400px;
+    preferred-width: 1150px;
+    preferred-height: 720px;
+    title: root.window_title;
+    background: Theme.bg;
+    full-screen: root.is_fullscreen;
+
+    // ════════════════════════════════════════════════════════════════
+    // PROPIEDADES
+    // ════════════════════════════════════════════════════════════════
+
+    // Identidad de ventana / app
+    in-out property <string> window_title: "LightMark";
+    in property <string> app_version: "0.1.0";
+
+    // Pestañas y grupos
+    in property <[TabInfo]> tabs;
+    in-out property <int> active_tab: 0;
+    in-out property <int> active_group: 0;
+    in property <int> group_count_used: 1;
+
+    // Documento / editor
+    in-out property <string> editor_text: "";
+    in property <int> cursor_line: 1;
+    in property <int> cursor_col: 1;
+    in property <string> line_numbers_text: "";
+    in property <bool> can_undo: false;
+    in property <bool> can_redo: false;
+    in property <bool> can_save: false;
+    // V15: "Guardar todo" solo debe estar activo si alguna pestaña (de cualquier grupo)
+    // tiene cambios sin guardar; antes estaba siempre habilitado.
+    in property <bool> can_save_all: false;
+    in property <bool> can_format: false;
+
+    // Ajustes de editor (persistidos vía Configuración)
+    in-out property <string> font_family: "Consolas";
+    in-out property <int> font_size: 14;
+    in-out property <int> tab_size: 4;
+    in-out property <bool> insert_spaces: true;
+    in-out property <bool> word_wrap: false;
+    in-out property <bool> show_line_numbers: true;
+    in-out property <int> autosave_delay_ms: 1000;
+    in-out property <bool> autosave_files: false;
+    in-out property <bool> restore_session: true;
+    in-out property <int> default_view_mode: 0;
+    in-out property <bool> show_toolbar: true;
+    in-out property <bool> show_status_bar: true;
+    in-out property <bool> show_explorer: false;
+    // R3: 0 = "Oscuro", 1 = "Océano". Alias de dos vías al global `Theme.current` (así
+    // cambiar cualquiera de los dos re-temátiza toda la UI al instante).
+    in-out property <int> theme <=> Theme.current;
+
+    // Vista (0 = solo editor, 1 = dividido, 2 = solo vista previa)
+    in-out property <int> view_mode: 0;
+    in-out property <bool> is_fullscreen: false;
+    in property <float> zoom_level: 1.0;
+
+    // Vista previa
+    in property <string> preview_title: "VISTA PREVIA";
+    in property <string> preview_text: "";
+    in property <[PreviewLine]> preview_items;
+    // M5: se inicializa/persiste desde `settings.preview_selectable` (antes quedaba
+    // desconectado de Configuración, arrancaba siempre en `true` y el toggle no se
+    // guardaba nunca).
+    in-out property <bool> preview_selectable: false;
+    in property <bool> preview_available: false;
+
+    // Búsqueda / reemplazo
+    in-out property <bool> show_search: false;
+    in-out property <string> search_query: "";
+    in-out property <string> replace_query: "";
+    in property <string> search_status: "Sin resultados";
+    in-out property <bool> search_case_sensitive: false;
+    in-out property <bool> search_whole_word: false;
+    in-out property <bool> search_regex: false;
+    in-out property <bool> search_replace_expanded: false;
+
+    // Explorador
+    in property <string> explorer_folder: "";
+    in property <string> explorer_folder_path: "";
+    in property <[ExplorerEntry]> explorer_entries;
+    in property <bool> explorer_has_folder: false;
+
+    // Barra de estado
+    in property <string> status_text: "Listo";
+    in property <string> doc_stats: "";
+    in property <string> language_label: "markdown";
+    in property <string> line_ending: "LF";
+
+    // Recientes (hasta 10 rutas; el menú "Recientes" usa slots fijos)
+    in property <[string]> recent_files;
+
+    // Diálogos
+    in-out property <bool> show_settings: false;
+    in-out property <bool> show_shortcuts: false;
+    in-out property <bool> show_about: false;
+    in-out property <bool> show_goto_line: false;
+    in-out property <string> goto_line_input: "";
+    in property <int> goto_line_max: 1;
+    in property <[ShortcutEntry]> shortcuts_list;
+
+    // `true` mientras cualquier diálogo modal está abierto: gatea los atajos del
+    // MenuBar (U2) para que no disparen acciones "por detrás" del overlay.
+    property <bool> modal-open: root.show_settings || root.show_shortcuts || root.show_about || root.show_goto_line;
+    // Expuesto para gatear atajos que solo deben actuar cuando el editor tiene el
+    // foco real (p.ej. Alt+Up/Down no deben mover líneas mientras se escribe en
+    // el buscador u otro campo — ver U2/R1_FIXES E2).
+    out property <bool> editor-has-focus: editor.has-focus;
+
+    // ════════════════════════════════════════════════════════════════
+    // CALLBACKS — Archivo
+    // ════════════════════════════════════════════════════════════════
+    callback new-tab();
+    callback open-file();
+    callback open-folder();
+    callback open-recent(int);
+    callback save();
+    callback save-as();
+    callback save-all();
+    callback export-zip();
+    callback close-tab(int);
+    callback close-all();
+    callback exit-app();
+    // Se dispara en cada clic de pestaña (ver TabBar más abajo). A diferencia de asignar
+    // `active_tab` directamente desde Slint, pasar por Rust evita que `editor_text`
+    // quede desincronizado del documento de la pestaña recién activada.
+    callback activate-tab(int);
+
+    // ── Edición ──
+    callback undo();
+    callback redo();
+    callback format-document();
+
+    // ── Búsqueda ──
+    callback search-changed(string);
+    callback find-next();
+    callback find-prev();
+    callback replace-one();
+    callback replace-all();
+    callback toggle-search-panel();
+
+    // ── Operaciones de línea (actúan sobre cursor/selección en Rust) ──
+    callback duplicate-line();
+    callback delete-line();
+    callback move-line-up();
+    callback move-line-down();
+    callback toggle-comment();
+    callback indent-line();
+    callback unindent-line();
+    callback join-lines();
+
+    // ── Vista ──
+    callback set-view-mode(int);
+    callback toggle-preview();
+    callback open-browser();
+    callback copy-preview();
+    callback zoom-in();
+    callback zoom-out();
+    callback zoom-reset();
+    callback toggle-fullscreen();
+
+    // ── Ir ──
+    // Se recibe como string (el diálogo ya valida numérico); Rust hace el parseo final.
+    callback goto-line(string);
+    callback next-tab();
+    callback prev-tab();
+    callback switch-group(int);
+
+    // ── Explorador ──
+    callback explorer-navigate(string);
+    callback explorer-open(string);
+    callback explorer-navigate-parent();
+
+    // ── Configuración / ayuda ──
+    callback settings-changed();
+    callback open-data-folder();
+    callback reset-settings();
+    callback open-app-folder();
+    callback show-scratch-help();
+
+    // ── Editor: edición de texto / cursor ──
+    callback text-edited(string);
+    callback cursor-moved(int, int);
+
+    // ════════════════════════════════════════════════════════════════
+    // FUNCIONES PÚBLICAS (Rust puede invocarlas directamente)
+    // ════════════════════════════════════════════════════════════════
+    public function select-range(anchor: int, cursor: int) {
+        editor.select-range(anchor, cursor);
+    }
+    public function focus-editor() {
+        editor.focus-editor();
+    }
+
+    // Nota (límite real de Slint 1.18, confirmado por el compilador — ver
+    // UI_CONTRACT.md): los `MenuItem` de un `MenuBar` NO son accesibles por id
+    // desde el componente que lo contiene ("Cannot access property ... inside
+    // of a MenuBar from enclosing component"), así que el patrón de
+    // "propiedades espejo + sync-menu-checks()" sugerido en R1_UI U3 para los
+    // grupos radio (view_mode/active_group/fullscreen) no puede compilar.
+    // Se usa en su lugar un binding one-way normal (`checked: <expr>`) en cada
+    // item, declarado in-place (sí permitido). Limitación residual conocida:
+    // MenuItem.checkable auto-alterna `checked` antes de `activated`; si el
+    // usuario hace clic sobre el item ya activo (sin cambio real de estado) el
+    // binding one-way puede quedar mostrando temporalmente un valor incorrecto
+    // hasta el siguiente cambio real de `view_mode`/`active_group`/`is_fullscreen`.
+    // Es un caso de borde cosmético aceptado (clic repetido sobre el modo ya
+    // activo), no una regresión funcional.
+
+    // V22 — LIMITACIÓN CONOCIDA de Slint 1.18: `Palette.accent-background` (std-widgets)
+    // es una propiedad `out`, no se puede sobreescribir desde el código de la app (error
+    // de compilación "Assignment on an 'out' property"); no hay forma soportada de
+    // recolorear el acento nativo de `Button{primary:true}`/`Switch` sin reimplementar
+    // esos widgets a mano. Se documenta como limitación residual en vez de fingir un
+    // arreglo que no compila.
+    init => {
+        root.focus-editor();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // MENÚ NATIVO
+    // ════════════════════════════════════════════════════════════════
+    MenuBar {
+        Menu {
+            title: "Archivo";
+            MenuItem { title: "Nuevo"; shortcut: @keys(Control + N); enabled: !root.modal-open; activated => { root.new-tab(); } }
+            MenuItem { title: "Abrir…"; shortcut: @keys(Control + O); enabled: !root.modal-open; activated => { root.open-file(); } }
+            MenuItem { title: "Abrir carpeta…"; shortcut: @keys(Control + Shift + O); enabled: !root.modal-open; activated => { root.open-folder(); } }
+            Menu {
+                title: "Recientes";
+                enabled: root.recent_files.length > 0 && !root.modal-open;
+                for path[i] in root.recent_files: MenuItem {
+                    title: path;
+                    activated => { root.open-recent(i); }
+                }
+            }
+            MenuSeparator {}
+            MenuItem { title: "Guardar"; shortcut: @keys(Control + S); enabled: root.can_save && !root.modal-open; activated => { root.save(); } }
+            MenuItem { title: "Guardar como…"; shortcut: @keys(Control + Shift + S); enabled: !root.modal-open; activated => { root.save-as(); } }
+            MenuItem { title: "Guardar todo"; shortcut: @keys(Control + Alt + S); enabled: root.can_save_all && !root.modal-open; activated => { root.save-all(); } }
+            MenuSeparator {}
+            MenuItem { title: "Exportar borradores a ZIP…"; enabled: !root.modal-open; activated => { root.export-zip(); } }
+            MenuSeparator {}
+            MenuItem { title: "Cerrar pestaña"; shortcut: @keys(Control + W); enabled: !root.modal-open; activated => { root.close-tab(root.active_tab); } }
+            MenuItem { title: "Cerrar todas"; enabled: !root.modal-open; activated => { root.close-all(); } }
+            MenuSeparator {}
+            MenuItem { title: "Configuración…"; shortcut: @keys(Control + Shift? + ","); enabled: !root.show_shortcuts && !root.show_about && !root.show_goto_line; activated => { root.show_settings = true; } }
+            MenuSeparator {}
+            MenuItem { title: "Salir"; activated => { root.exit-app(); } }
+        }
+
+        Menu {
+            title: "Editar";
+            // Deshacer/Rehacer: sin `shortcut` en el menú (U2) — Ctrl+Z/Ctrl+Y/Ctrl+Shift+Z
+            // se manejan en CodeEditor.key-pressed → undo-requested/redo-requested más abajo,
+            // para que nunca compitan con el deshacer nativo del TextInput enfocado.
+            MenuItem { title: "Deshacer"; enabled: root.can_undo && !root.modal-open; activated => { root.undo(); } }
+            MenuItem { title: "Rehacer"; enabled: root.can_redo && !root.modal-open; activated => { root.redo(); } }
+            MenuSeparator {}
+            // Cortar/Copiar/Pegar/Seleccionar todo: sin `shortcut` (U2/E2) — el TextInput
+            // nativo enfocado ya maneja Ctrl+X/C/V/A; el menú solo ofrece el acceso por clic.
+            // V23: sin `shortcut:` real (el TextInput nativo enfocado ya maneja
+            // Ctrl+X/C/V/A — ver nota U2/E2 arriba), pero con la pista de atajo en el
+            // propio título (como VS Code) para que no parezca que no tienen atajo.
+            MenuItem { title: "Cortar	Ctrl+X"; enabled: !root.modal-open && root.view_mode != 2; activated => { editor.do-cut(); } }
+            MenuItem { title: "Copiar	Ctrl+C"; enabled: !root.modal-open && root.view_mode != 2; activated => { editor.do-copy(); } }
+            MenuItem { title: "Pegar	Ctrl+V"; enabled: !root.modal-open && root.view_mode != 2; activated => { editor.do-paste(); } }
+            MenuItem { title: "Seleccionar todo	Ctrl+A"; enabled: !root.modal-open && root.view_mode != 2; activated => { editor.do-select-all(); } }
+            MenuSeparator {}
+            // C21: deben pasar por el mismo callback de Rust que el botón de la barra de
+            // herramientas (root.toggle-search-panel(), que recalcula resultados) en vez
+            // de solo poner `show_search = true` a mano; si el panel ya está abierto no se
+            // vuelve a togglear (no lo cierran), solo se enfoca/expande.
+            MenuItem { title: "Buscar"; shortcut: @keys(Control + F); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } search-panel.focus-search(); } }
+            MenuItem { title: "Reemplazar"; shortcut: @keys(Control + H); enabled: !root.modal-open; activated => { if (!root.show_search) { root.toggle-search-panel(); } root.search_replace_expanded = true; search-panel.focus-search(); } }
+            MenuItem { title: "Buscar siguiente"; shortcut: @keys(F3); enabled: !root.modal-open; activated => { root.find-next(); } }
+            MenuItem { title: "Buscar anterior"; shortcut: @keys(Shift + F3); enabled: !root.modal-open; activated => { root.find-prev(); } }
+            MenuSeparator {}
+            MenuItem { title: "Formatear documento"; shortcut: @keys(Control + Shift + F); enabled: root.can_format && !root.modal-open; activated => { root.format-document(); } }
+        }
+
+        Menu {
+            title: "Selección";
+            MenuItem { title: "Duplicar línea"; shortcut: @keys(Control + Shift + D); enabled: !root.modal-open; activated => { root.duplicate-line(); } }
+            MenuItem { title: "Eliminar línea"; shortcut: @keys(Control + Shift + K); enabled: !root.modal-open; activated => { root.delete-line(); } }
+            MenuItem { title: "Mover línea arriba"; shortcut: @keys(Alt + UpArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-up(); } }
+            MenuItem { title: "Mover línea abajo"; shortcut: @keys(Alt + DownArrow); enabled: !root.modal-open && root.editor-has-focus; activated => { root.move-line-down(); } }
+            MenuSeparator {}
+            MenuItem { title: "Comentar / descomentar"; shortcut: @keys(Control + Shift? + "/"); enabled: !root.modal-open; activated => { root.toggle-comment(); } }
+            MenuItem { title: "Indentar"; enabled: !root.modal-open; activated => { root.indent-line(); } }
+            MenuItem { title: "Desindentar"; enabled: !root.modal-open; activated => { root.unindent-line(); } }
+            MenuItem { title: "Unir líneas"; shortcut: @keys(Control + J); enabled: !root.modal-open; activated => { root.join-lines(); } }
+        }
+
+        Menu {
+            title: "Ver";
+            // Toggles simples: `checked <=>` two-way real (no one-way + flip manual, ver U3):
+            // el auto-toggle de MenuItem.checkable ya escribe el valor correcto en la
+            // propiedad enlazada; `activated` solo dispara el efecto lateral (persistir).
+            MenuItem { title: "Barra de herramientas"; enabled: !root.modal-open; checkable: true; checked <=> root.show_toolbar; activated => { root.settings-changed(); } }
+            MenuItem { title: "Barra de estado"; enabled: !root.modal-open; checkable: true; checked <=> root.show_status_bar; activated => { root.settings-changed(); } }
+            MenuItem { title: "Explorador"; shortcut: @keys(Control + B); enabled: !root.modal-open; checkable: true; checked <=> root.show_explorer; activated => { root.settings-changed(); } }
+            MenuItem { title: "Ajuste de línea"; shortcut: @keys(Alt + Z); enabled: !root.modal-open; checkable: true; checked <=> root.word_wrap; activated => { root.settings-changed(); } }
+            MenuItem { title: "Números de línea"; enabled: !root.modal-open && !root.word_wrap; checkable: true; checked <=> root.show_line_numbers; activated => { root.settings-changed(); } }
+            MenuSeparator {}
+            // Radio (view_mode): binding one-way in-place (ver nota de limitación arriba).
+            MenuItem { title: "Solo editor"; enabled: !root.modal-open; checkable: true; checked: root.view_mode == 0; activated => { root.set-view-mode(0); } }
+            MenuItem { title: "Dividido"; enabled: !root.modal-open && root.preview_available; checkable: true; checked: root.view_mode == 1; activated => { root.set-view-mode(1); } }
+            MenuItem { title: "Solo vista previa"; enabled: !root.modal-open && root.preview_available; checkable: true; checked: root.view_mode == 2; activated => { root.set-view-mode(2); } }
+            MenuItem { title: "Alternar vista previa"; shortcut: @keys(Control + M); enabled: !root.modal-open && root.preview_available; activated => { root.toggle-preview(); } }
+            MenuItem { title: "Vista previa: texto seleccionable"; enabled: !root.modal-open && root.preview_available; checkable: true; checked <=> root.preview_selectable; activated => { root.settings-changed(); } }
+            MenuItem { title: "Abrir vista previa en navegador"; enabled: root.preview_available && !root.modal-open; activated => { root.open-browser(); } }
+            MenuSeparator {}
+            Menu {
+                title: "Tema";
+                MenuItem { title: "Oscuro"; enabled: !root.modal-open; checkable: true; checked: root.theme == 0; activated => { root.theme = 0; root.settings-changed(); } }
+                MenuItem { title: "Océano"; enabled: !root.modal-open; checkable: true; checked: root.theme == 1; activated => { root.theme = 1; root.settings-changed(); } }
+            }
+            MenuSeparator {}
+            MenuItem { title: "Acercar"; shortcut: @keys(Control + Shift? + "+"); enabled: !root.modal-open; activated => { root.zoom-in(); } }
+            MenuItem { title: "Alejar"; shortcut: @keys(Control + Shift? + "-"); enabled: !root.modal-open; activated => { root.zoom-out(); } }
+            MenuItem { title: "Restablecer zoom"; shortcut: @keys(Control + Shift? + "0"); enabled: !root.modal-open; activated => { root.zoom-reset(); } }
+            MenuSeparator {}
+            MenuItem { title: "Pantalla completa"; shortcut: @keys(F11); enabled: !root.modal-open; checkable: true; checked: root.is_fullscreen; activated => { root.toggle-fullscreen(); } }
+        }
+
+        Menu {
+            title: "Ir";
+            MenuItem { title: "Ir a línea…"; shortcut: @keys(Control + G); enabled: !root.modal-open; activated => { root.goto_line_input = ""; root.show_goto_line = true; } }
+            MenuItem { title: "Pestaña siguiente"; shortcut: @keys(Control + Tab); enabled: !root.modal-open; activated => { root.next-tab(); } }
+            MenuItem { title: "Pestaña anterior"; shortcut: @keys(Control + Shift + Tab); enabled: !root.modal-open; activated => { root.prev-tab(); } }
+            MenuSeparator {}
+            MenuItem { title: "Grupo 1"; shortcut: @keys(Alt + "1"); enabled: !root.modal-open; checkable: true; checked: root.active_group == 0; activated => { root.switch-group(0); } }
+            MenuItem { title: "Grupo 2"; shortcut: @keys(Alt + "2"); enabled: !root.modal-open; checkable: true; checked: root.active_group == 1; activated => { root.switch-group(1); } }
+            MenuItem { title: "Grupo 3"; shortcut: @keys(Alt + "3"); enabled: !root.modal-open; checkable: true; checked: root.active_group == 2; activated => { root.switch-group(2); } }
+            MenuItem { title: "Grupo 4"; shortcut: @keys(Alt + "4"); enabled: !root.modal-open; checkable: true; checked: root.active_group == 3; activated => { root.switch-group(3); } }
+        }
+
+        Menu {
+            title: "Ayuda";
+            MenuItem { title: "Atajos de teclado"; shortcut: @keys(F1); enabled: !root.show_settings && !root.show_about && !root.show_goto_line; activated => { root.show_shortcuts = true; } }
+            MenuItem { title: "¿Cómo funciona el autoguardado?"; enabled: !root.modal-open; activated => { root.show-scratch-help(); } }
+            MenuSeparator {}
+            MenuItem { title: "Acerca de LightMark"; enabled: !root.modal-open; activated => { root.show_about = true; } }
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // LAYOUT PRINCIPAL
+    // ════════════════════════════════════════════════════════════════
+    VerticalLayout {
+        spacing: 0px;
+        padding: 0px;
+
+        // ── Barra de herramientas ──────────────────────────────────
+        if root.show_toolbar: Rectangle {
+            height: Theme.toolbar-height;
+            background: Theme.sidebar-bg;
+
+            Rectangle { y: parent.height - 1px; height: 1px; width: 100%; background: Theme.border; }
+
+            HorizontalLayout {
+                padding-left: 6px;
+                padding-right: 6px;
+                spacing: 4px;
+
+                IconButton { icon: @image-url("icons/file-plus.svg"); tooltip-text: "Nuevo (Ctrl+N)"; clicked => { root.new-tab(); } }
+                IconButton { icon: @image-url("icons/folder-open.svg"); tooltip-text: "Abrir (Ctrl+O)"; clicked => { root.open-file(); } }
+                IconButton { icon: @image-url("icons/save.svg"); tooltip-text: "Guardar (Ctrl+S)"; enabled: root.can_save; clicked => { root.save(); } }
+                IconButton { icon: @image-url("icons/save-all.svg"); tooltip-text: "Guardar todo (Ctrl+Alt+S)"; enabled: root.can_save_all; clicked => { root.save-all(); } }
+                ToolbarSeparator {}
+
+                IconButton { icon: @image-url("icons/undo.svg"); tooltip-text: "Deshacer (Ctrl+Z)"; enabled: root.can_undo; clicked => { root.undo(); } }
+                IconButton { icon: @image-url("icons/redo.svg"); tooltip-text: "Rehacer (Ctrl+Y)"; enabled: root.can_redo; clicked => { root.redo(); } }
+                ToolbarSeparator {}
+
+                IconButton { icon: @image-url("icons/search.svg"); tooltip-text: "Buscar (Ctrl+F)"; active: root.show_search; clicked => { root.toggle-search-panel(); if (root.show_search) { search-panel.focus-search(); } else { root.focus-editor(); } } }
+                IconButton { icon: @image-url("icons/wand.svg"); tooltip-text: "Formatear documento (Ctrl+Shift+F)"; enabled: root.can_format; clicked => { root.format-document(); } }
+                ToolbarSeparator {}
+
+                SegmentedControl {
+                    segments: [
+                        { icon: @image-url("icons/panel-editor.svg"), tooltip: "Solo editor", enabled: true },
+                        { icon: @image-url("icons/columns.svg"), tooltip: root.preview_available ? "Dividido" : "Dividido (no disponible para este lenguaje)", enabled: root.preview_available },
+                        { icon: @image-url("icons/eye.svg"), tooltip: root.preview_available ? "Solo vista previa" : "Solo vista previa (no disponible para este lenguaje)", enabled: root.preview_available },
+                    ];
+                    selected: root.view_mode;
+                    selected-changed(i) => { root.set-view-mode(i); }
+                }
+                IconButton { icon: @image-url("icons/globe.svg"); tooltip-text: "Abrir en navegador"; enabled: root.preview_available; clicked => { root.open-browser(); } }
+                ToolbarSeparator {}
+
+                IconButton { icon: @image-url("icons/sidebar.svg"); tooltip-text: "Explorador (Ctrl+B)"; active: root.show_explorer; clicked => { root.show_explorer = !root.show_explorer; root.settings-changed(); } }
+                IconButton { icon: @image-url("icons/wrap-text.svg"); tooltip-text: "Ajuste de línea (Alt+Z)"; active: root.word_wrap; clicked => { root.word_wrap = !root.word_wrap; root.settings-changed(); } }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                IconButton { icon: @image-url("icons/settings.svg"); tooltip-text: "Configuración (Ctrl+,)"; active: root.show_settings; clicked => { root.show_settings = true; } }
+            }
+        }
+
+        // ── Pestañas ─────────────────────────────────────────────────
+        TabBar {
+            tabs: root.tabs;
+            active-tab: root.active_tab;
+            active-group: root.active_group;
+            group-count-used: root.group_count_used;
+            tab-clicked(i) => { root.activate-tab(i); }
+            close-tab(i) => { root.close-tab(i); }
+            new-tab => { root.new-tab(); }
+            switch-group(g) => { root.switch-group(g); }
+        }
+
+        // ── Área central ────────────────────────────────────────────
+        HorizontalLayout {
+            spacing: 0px;
+            vertical-stretch: 1;
+
+            if root.show_explorer: Explorer {
+                current-folder: root.explorer_folder;
+                current-folder-path: root.explorer_folder_path;
+                entries: root.explorer_entries;
+                has-folder: root.explorer_has_folder;
+                open-folder => { root.open-folder(); }
+                navigate-parent => { root.explorer-navigate-parent(); }
+                navigate(p) => { root.explorer-navigate(p); }
+                open-entry(p) => { root.explorer-open(p); }
+            }
+
+            // Área de contenido: posicionamiento manual (no HorizontalLayout) para
+            // poder calcular anchos de editor/vista previa según view_mode sin que
+            // el editor deje de existir nunca (así conserva un id accesible desde
+            // el MenuBar y las funciones públicas de root: no puede estar dentro
+            // de un `if`, que crea un elemento condicional sin id accesible fuera).
+            content-area := Rectangle {
+                horizontal-stretch: 1;
+                clip: true;
+
+                editor := CodeEditor {
+                    x: 0px;
+                    y: 0px;
+                    width: root.view_mode == 2 ? 0px : (root.view_mode == 1 ? (parent.width - 1px) / 2 : parent.width);
+                    height: parent.height;
+                    visible: root.view_mode != 2;
+                    interactive: root.view_mode != 2 && !root.modal-open;
+                    text <=> root.editor_text;
+                    font-family: root.font_family;
+                    font-size: root.font_size * 1px;
+                    wrap: root.word_wrap;
+                    show-line-numbers: root.show_line_numbers;
+                    line-numbers-text: root.line_numbers_text;
+                    edited(t) => { root.text-edited(t); }
+                    cursor-moved(c, a) => { root.cursor-moved(c, a); }
+                    indent-requested => { root.indent-line(); }
+                    unindent-requested => { root.unindent-line(); }
+                    escape-pressed => { root.show_search = false; }
+                    undo-requested => { if (root.can_undo) { root.undo(); } }
+                    redo-requested => { if (root.can_redo) { root.redo(); } }
+                }
+
+                if root.view_mode == 1: Rectangle {
+                    x: editor.width;
+                    y: 0px;
+                    width: 1px;
+                    height: parent.height;
+                    background: Theme.border;
+                }
+
+                if root.view_mode == 1 || root.view_mode == 2: PreviewPanel {
+                    x: root.view_mode == 1 ? editor.width + 1px : 0px;
+                    y: 0px;
+                    width: root.view_mode == 1 ? parent.width - editor.width - 1px : parent.width;
+                    height: parent.height;
+                    title: root.preview_title;
+                    preview-text: root.preview_text;
+                    preview-items: root.preview_items;
+                    selectable: root.preview_selectable;
+                    browser-available: root.preview_available;
+                    toggle-selectable => { root.preview_selectable = !root.preview_selectable; root.settings-changed(); }
+                    copy-preview => { root.copy-preview(); }
+                    open-browser => { root.open-browser(); }
+                }
+            }
+        }
+
+        if root.show_status_bar: StatusBar {
+            status-text: root.status_text;
+            line: root.cursor_line;
+            column: root.cursor_col;
+            doc-stats: root.doc_stats;
+            language-label: root.language_label;
+            line-ending: root.line_ending;
+            zoom-level: root.zoom_level;
+        }
+    }
+
+    // ── Panel de búsqueda flotante (esquina superior derecha) ──────
+    // Siempre instanciado (no dentro de `if`) para que su id sea accesible desde
+    // el menú (Buscar/Reemplazar necesitan enfocarlo); se oculta con `visible`.
+    search-panel := SearchPanel {
+        visible: root.show_search;
+        panel-max-width: root.width;
+        x: parent.width - self.width - 12px;
+        y: (root.show_toolbar ? Theme.toolbar-height : 0px) + Theme.tab-height + 6px;
+        z: 100;
+        search-query <=> root.search_query;
+        replace-query <=> root.replace_query;
+        result-text: root.search_status;
+        case-sensitive: root.search_case_sensitive;
+        whole-word: root.search_whole_word;
+        use-regex: root.search_regex;
+        replace-expanded: root.search_replace_expanded;
+        search-changed(t) => { root.search-changed(t); }
+        find-next => { root.find-next(); }
+        find-prev => { root.find-prev(); }
+        replace-one => { root.replace-one(); }
+        replace-all => { root.replace-all(); }
+        toggle-case-sensitive => { root.search_case_sensitive = !root.search_case_sensitive; root.search-changed(root.search_query); }
+        toggle-whole-word => { root.search_whole_word = !root.search_whole_word; root.search-changed(root.search_query); }
+        toggle-regex => { root.search_regex = !root.search_regex; root.search-changed(root.search_query); }
+        toggle-replace-expanded => { root.search_replace_expanded = !root.search_replace_expanded; }
+        close => { root.show_search = false; root.focus-editor(); }
+    }
+
+    // ── Diálogos modales ────────────────────────────────────────────
+    if root.show_settings: SettingsDialog {
+        z: 200;
+        font-family <=> root.font_family;
+        font-size <=> root.font_size;
+        tab-size <=> root.tab_size;
+        insert-spaces <=> root.insert_spaces;
+        word-wrap <=> root.word_wrap;
+        show-line-numbers <=> root.show_line_numbers;
+        autosave-delay-ms <=> root.autosave_delay_ms;
+        autosave-files <=> root.autosave_files;
+        restore-session <=> root.restore_session;
+        default-view-mode <=> root.default_view_mode;
+        show-toolbar <=> root.show_toolbar;
+        show-status-bar <=> root.show_status_bar;
+        show-explorer <=> root.show_explorer;
+        preview-selectable <=> root.preview_selectable;
+        theme <=> root.theme;
+        settings-changed => {
+            root.settings-changed();
+        }
+        open-data-folder => { root.open-data-folder(); }
+        reset-settings => { root.reset-settings(); }
+        close => { root.show_settings = false; root.focus-editor(); }
+    }
+
+    if root.show_shortcuts: ShortcutsDialog {
+        z: 200;
+        shortcuts: root.shortcuts_list;
+        close => { root.show_shortcuts = false; root.focus-editor(); }
+    }
+
+    if root.show_about: AboutDialog {
+        z: 200;
+        app-version: root.app_version;
+        slint-version: "1.18.1";
+        close => { root.show_about = false; root.focus-editor(); }
+    }
+
+    if root.show_goto_line: GotoLineDialog {
+        z: 200;
+        max-line: root.goto_line_max;
+        line-input <=> root.goto_line_input;
+        confirm(s) => { root.goto-line(s); root.show_goto_line = false; root.focus-editor(); }
+        close => { root.show_goto_line = false; root.focus-editor(); }
+    }
+}
