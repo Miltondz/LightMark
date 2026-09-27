@@ -46,7 +46,11 @@ export component AiSettingsDialog inherits ModalShell {
                 font-size: Theme.font-size-small;
                 color: Theme.text-muted;
             }
-            Switch { text: "Activar funciones de IA"; checked <=> root.ai-enabled; toggled => { root.settings-changed(); } }
+            Switch {
+                text: "Acepto y activo las funciones de IA (se enviará texto del documento al proveedor)";
+                checked <=> root.ai-enabled;
+                toggled => { root.settings-changed(); }
+            }
 
             HorizontalLayout {
                 spacing: 8px;
@@ -62,6 +66,7 @@ export component AiSettingsDialog inherits ModalShell {
                 Text { text: "Modelo:"; color: Theme.text; vertical-alignment: center; width: 110px; }
                 ComboBox {
                     model: root.model-names;
+                    current-value: root.model;
                     selected(v) => { root.model = v; root.settings-changed(); }
                 }
             }
@@ -69,7 +74,7 @@ export component AiSettingsDialog inherits ModalShell {
                 spacing: 8px;
                 Text { text: "ID de modelo:"; color: Theme.text; vertical-alignment: center; width: 110px; }
                 LineEdit { text <=> root.model; edited(t) => { root.settings-changed(); } }
-                Button { text: "Actualizar lista"; enabled: !root.busy; clicked => { root.refresh-models(); } }
+                Button { text: root.busy ? "Cancelar" : "Actualizar lista"; clicked => { root.refresh-models(); } }
             }
             if root.base-url-editable: HorizontalLayout {
                 spacing: 8px;
@@ -82,19 +87,20 @@ export component AiSettingsDialog inherits ModalShell {
                 LineEdit {
                     text <=> root.key-input;
                     input-type: root.show-key ? InputType.text : InputType.password;
-                    placeholder-text: "Pega aquí tu clave";
+                    placeholder-text: root.key-stored ? "Clave guardada (pega otra para reemplazarla)" : "Pega aquí tu clave";
                 }
                 Button { text: root.show-key ? "Ocultar" : "Ver"; clicked => { root.show-key = !root.show-key; } }
             }
             if root.needs-key: HorizontalLayout {
                 spacing: 8px;
-                Button { text: "Guardar clave"; clicked => { root.save-key(); } }
+                Button { text: "Guardar clave"; enabled: root.key-input != ""; clicked => { root.save-key(); } }
                 Button { text: "Borrar clave"; enabled: root.key-stored; clicked => { root.delete-key(); } }
                 Text { text: root.key-stored ? "Clave guardada ✓" : "Sin clave"; color: Theme.text-muted; vertical-alignment: center; }
             }
             HorizontalLayout {
                 alignment: start;
-                Button { text: "Probar conexión"; enabled: !root.busy; clicked => { root.test-connection(); } }
+                // Mientras hay una solicitud en curso el mismo botón la cancela (Rust lo decide).
+                Button { text: root.busy ? "Cancelar" : "Probar conexión"; clicked => { root.test-connection(); } }
             }
 
             Rectangle { height: 1px; background: Theme.border; }
